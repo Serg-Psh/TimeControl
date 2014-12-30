@@ -1,0 +1,863 @@
+<?xml version='1.0' encoding='windows-1251' standalone='yes'?>
+<package>
+<job id="TimeControl">
+	<runtime>
+		<description>Контроль знаний и времени</description>
+		<named
+			name = "EditMode"
+			helpstring = "Включение режима редактирования заданий"
+			type = "boolean"
+			required = "false"
+		/>
+		
+		<named
+			name = "Close"
+			helpstring = "Завершение работы"
+			type = "simple"
+			required = "false"
+		/>
+
+		
+		<example>Например: tc4.wsf /EditMode+</example>
+	</runtime>
+	<resource id="PageHTML"><![CDATA[
+		<div id="score">
+			На сегодня: заработано - <label id="lbEarned">0</label>,
+			израсходовано - <label id="lbSpent">0</label>,
+			осталось - <label id="lbTotal">0</label>
+			<button id="btButton1"></button>
+		</div>
+		<div id="list"><table id="tbl" width="100%" cellpadding="0" cellspacing="0" border="0">
+		<thead style="background-color: lavender;"><tr><th>Вес</th><th>Текст задачи</th><th>Ответ</th></tr></thead>
+		<tbody id="tb"></tbody></table>
+		</div>
+		<div id="test"></div>
+	]]></resource>
+
+
+
+
+
+<script language="JScript"><![CDATA[
+
+var command = { fresh: false, cmd: null, set: function(theCommand) { this.fresh = true; this.cmd = theCommand } };
+var cmdEditModeOn = 1;
+var cmdEditModeOff = 2;
+var cmdQuit = 3;
+var cmdShowInterface = 4;
+var cmdCloseInterface = 5;
+
+var Ticks = 10;			// Интервал времени, через который идёт отсчёт (виртуальная минута).
+var DailyLimit = 40;	// минут разрешено в сутки
+var remain = 0;			// Количество оставшихся (виртуальных) минут
+var EditMode = false;
+var Backup;	// Объект для сохранения настроек IE
+var list;	// Список задач
+var CurrentPath = WScript.ScriptFullName.substring(0, WScript.ScriptFullName.indexOf(WScript.ScriptName));
+var db1FileName = CurrentPath + "tc.db";
+var db2FileName = CurrentPath + "tc_copy.db";
+
+var dynwrapxLib = CurrentPath + ".dynwrapx";	// "dynwrapx.dll"
+var sqlite3Lib = CurrentPath + ".sqlite3";		// "sqlite3.dll"
+
+var DX;	// DynamicWrapperX объект.
+var IE;	// Основной интерфейс - InternetExplorer
+
+// 18.12.2013 Перенёс историю версий и изменений в отдельный файл tc-history.txt
+
+
+Date.prototype.format = function(format) {
+	var _aMonth = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+	var yyyy = this.getFullYear();
+	var yy = yyyy.toString().substring(2);
+	var m = this.getMonth() + 1;
+	var mm = m < 10 ? "0" + m : m;
+	var d = this.getDate();
+	var dd = d < 10 ? "0" + d : d;
+	var h = this.getHours();
+	var hh = h < 10 ? "0" + h : h;
+	var n = this.getMinutes();
+	var nn = n < 10 ? "0" + n : n;
+	var s = this.getSeconds();
+	var ss = s < 10 ? "0" + s : s;
+
+	format = format.replace(/yyyy/i, yyyy);
+	format = format.replace(/yy/i, yy);
+	format = format.replace(/mm/i, mm);
+	format = format.replace(/m/i, m);
+	format = format.replace(/dd/i, dd);
+	format = format.replace(/d/i, d);
+	format = format.replace(/hh/i, hh);
+	format = format.replace(/h/i, h);
+	format = format.replace(/nn/i, nn);
+	format = format.replace(/n/i, n);
+	format = format.replace(/ss/i, ss);
+	format = format.replace(/s/i, s);
+	format = format.replace(/B/, _aMonth[m-1]);
+
+	return format;
+}
+
+
+
+
+/* ============================
+	Класс SQLiteDB
+!!!
+Используется внешний для класса объект DX (DynamicWrapperX), с предварительно зарегистрированными функциями SQLite
+!!!
+============================ */
+function SQLiteDB() {
+	var SQLITE_OK = 0		/* Successful result */
+	var SQLITE_BUSY = 5		/* The database file is locked */
+	var SQLITE_MISUSE = 21	/* Library used incorrectly */
+	var SQLITE_ROW = 100	/* sqlite3_step() has another row ready */
+	var SQLITE_DONE = 101	/* sqlite3_step() has finished executing */
+// 25.04.2012: Использую глобальное определение текущего пути и имени базы данных
+//	var CurrentPath = WScript.ScriptFullName.substring(0, WScript.ScriptFullName.indexOf(WScript.ScriptName));
+// 23.09.2013: В каждой таблицк SQLite создаёт колонку с уникальным идентификатором. Это поле можно использовать,
+// как обычное, указывая одно из  служебных имён "ROWID", "OID" или "_ROWID_". Однако, есть особенности:
+//	1) Это имя нужно указывать конкретно ("SELECT * ..." его не задействует, а "SELECT *, ROWID ..." - выдаст);
+//	2) Если в таблице есть ключевое поле "INTEGER PRIMARY KEY", то будет возвращается именно оно.
+
+
+
+	this.db = 0;	// Ссылка на sqlite3 объект
+	this.stmt = 0;	// Ссылка на Statement объект
+	this.Close = function() {
+		var r;
+		r = DX.sqlite3_finalize(this.stmt);
+		if (r != SQLITE_OK) WScript.Echo("sqlite3_finalize ERROR: " + r);
+		r = DX.sqlite3_close(this.db);
+		if (r != SQLITE_OK) WScript.Echo("Ошибка " + r + " закрытия соединения с базой данных!\r\nstatement: " + this.stmt + "\r\nthis.db: " + this.db);
+	};
+	this.Open = function(FileName) {
+		if (this.db) this.Close();
+		var pDB = DX.Space(4, "");		// Буфер (строка 4 байта). В неё будет записан адрес sqlite3 объекта.
+		var r = DX.sqlite3_open16(FileName || db1FileName, pDB);
+		this.db = DX.NumGet(pDB);
+		return r;
+	};
+	this.Execute = function(SQL, log) {
+		var r;
+		if (log) this.Log("Execute SQL: " + SQL);
+		r = DX.sqlite3_finalize(this.stmt);
+		if (r != SQLITE_OK) WScript.Echo("Execute: sqlite3_finalize ERROR: " + r);
+		//if (SQL.slice(-1) != ";") SQL +=";";
+		if (!/;\s*$/.test(SQL)) SQL +=";";
+		var pStmt = DX.Space(4, "");	// Буфер (4 байта). В неё будет записан адрес Statement handle объекта.
+		var pTail = DX.Space(4, "");	/* OUT: Pointer to unused portion of zSql. Если был сложный запрос из нескольких запросов. Я пока не обрабатываю. */
+		r = DX.sqlite3_prepare16_v2(this.db, SQL, -1, pStmt, pTail);
+		this.stmt = DX.NumGet(pStmt);
+		if (r != SQLITE_OK) this.Log("Ошибка функции sqlite3_prepare16_v2: " + r + "\r\n" + SQL, true);
+		return (r || this.MoveNext());
+	};
+	this.MoveNext = function () {
+		var r = DX.sqlite3_step(this.stmt);
+		this.EOF = (r != SQLITE_ROW);
+		return r;
+	};
+	this.EOF = true;
+	this.Item = function(index) {
+		// !!! Внимание !!! Имена полей регистрозависимы!!!
+		var r = null;
+		switch (typeof index) {
+// 18.04.2012: ToDo: При запросе после которого возвращается пустое значение скрипт выдаёт ошибку "Недостаточно памяти".
+// Пока я просто игнорирую ошибки. Надо разобраться.
+			case "number": try {r = DX.sqlite3_column_text16(this.stmt, index);} catch(e) {} break;
+			case "string": for (var i=0; i < this.ColumnCount(); i++) if (index == DX.sqlite3_column_name16(this.stmt, i)) { try {r = DX.sqlite3_column_text16(this.stmt, i);} catch(e) {} break; }
+		}
+		return r;
+	};
+	this.FetchArray = function() {
+		var a = [];
+//		var a = {};
+//		for (var i=0; i < this.ColumnCount(); i++) a[DX.sqlite3_column_name16(this.stmt, i)] = DX.sqlite3_column_text16(this.stmt, i);
+		for (var i=0; i < this.ColumnCount(); i++) a[i] = DX.sqlite3_column_text16(this.stmt, i);
+		return a;
+	}
+	this.ColumnName = function(index) { return DX.sqlite3_column_name16(this.stmt, index) };
+	this.ColumnCount = function() { return DX.sqlite3_column_count(this.stmt) };
+
+	this.Log = function(msg, show) {
+		var t = (new Date()).format("yyyy.mm.dd hh:nn:ss");
+		msg = t + ": " + msg;
+		var ForAppending = 8;
+		var ts = (new ActiveXObject("Scripting.FileSystemObject")).OpenTextFile(db1FileName + ".log", ForAppending, true);
+		ts.WriteLine(msg);
+		ts.Close();
+		if (show) WScript.Echo(msg)
+	}
+
+
+	this.Open();
+	return this;
+}
+
+
+
+
+
+
+function ShowWindow() {
+	if (!IE) return;
+//	if (!IE.TheaterMode) IE.TheaterMode = true;
+	if (IE.AddressBar) IE.AddressBar = false;
+
+	// Тут нужно проверить, виден ли интерфейс, и, если не виден (всёрнут, сдвинут или не на переднем плане), вывести его на передний план.
+
+//	29.03.2012: Очевидно, придётся делать с внешним dllwrap-ером через user32.dll
+//	(new ActiveXObject("WScript.Shell")).AppActivate(IE.LocationName+" - "+IE.Name);	// активирует, но не выносит на пердний план!!!!!!!!!!!!!!!!!!
+//	Странно, но user32.dll-SetForegroundWindow делает тоже самое - окно моргает на панели задач, но не активируется и не выносится на передний план!
+//	Такой же результат при вызове IE.document.parentWindow.focus();
+//	12.04.2012: Все функции (focus, AppActivate, SetForegroundWindow) делают одно и тоже. Выводят IE на передний план, если я больще ничего не делаю
+//	(запустил скрипт, создал интерфейс и выдвинул его вперёд). Стоит пользователю активировать вругое окно и после этого каждый вызов любой из этих
+//	функций будет заканчиваться лишь морганием интерфейса в панели задач.
+
+
+// Странно, но если после вызова функции SetForegroundWindow вывести сообщение (WScript.Echo), то окно действительно
+// выходит на передний план (а сообщение под ним). Иначе окно на передний план не выводится.
+//WScript.Echo("DX.SetForegroundWindow(IE.HWND): " + r);
+
+// 25.04.2012: Попробую сначала просто минимизировать все окна. Работает. Можно ещё прикрутить objShellApp.UndoMinimizeAll() [http://www.script-coding.com/WSH/Shell.html]
+//	var objShellApp = new ActiveXObject("Shell.Application");
+//	objShellApp.MinimizeAll();
+//	WScript.Sleep(100);
+//	IE.document.parentWindow.focus();
+//	(new ActiveXObject("WScript.Shell")).Popup("Window", 5, "Предупреждение");
+// С минимизацией окон работает, но не красиво - перепрыгивают все окна.
+
+/*
+// Ещё попытка вывести окно вперёд, используя SetWindowPos
+	var HWND_TOP = 0;
+	var HWND_TOPMOST = -1;
+	var HWND_NOTOPMOST = -2;
+	var SWP_NOSIZE = 0x01;
+	var SWP_NOMOVE = 0x02;
+	var SWP_NOACTIVATE = 0x010;
+	var SWP_SHOWWINDOW = 0x040;
+	DX.Register("user32.dll", "SetWindowPos", "i=hhlllll", "r=l");	// !!! Не восстанавливает окно, если оно свёрнуто !!!
+	var r = DX.SetWindowPos(IE.HWND, HWND_TOP, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE);
+//WshShell.Popup("DX.SetWindowPos: " + r, 5, "Предупреждение");
+*/
+
+// 13.09.2013: Функция SetForegroundWindow работает, только если вызывающий её процесс является активным. Активный
+// процесс тот, чей поток обрабатывает пользовательский ввод (Так и сказано в документации по функции).
+// Оказывается, наш процесс может "прикинуться" активным, подключив свой поток к обработке пользовательского ввода.
+// Это осуществляется при помощи функции AttachThreadInput. После вызова SetForegroundWindow можно будет отключиться
+// от чужого потока, используя эту же функцию. [http://www.rsdn.ru/article/qna/ui/windsetfg.xml]
+
+// 16.06.2013: Сколько было "сломано копий" вокруг SetForegroundWindow, которая работала правильно только первый раз,
+// а потом не помагали никакие ухищренья (вывод сообщения, подключения к другому процессу, ...). Сегодня решил попробовать
+// функцию SwitchToThisWindow, не для обычного использования и, возможно, в будущем не поддерживаемую. Эта функция
+// может переключать в окно и вынасти его вперёд, эмулируя нажатие пользователем Alt/Ctrl+Tab.
+// Главное, что она работает, как мне надо!
+
+// 17.09.2013: Что-то "правильность" этой функции тоже пошатнулась... Не всегда переключается в окно. Как уже замучали эти тайные условности!
+
+
+// 17.12.2013: !!!!! Однако, если окно интерфейса просто минимизировать, а потом передать ему фокус, то оно выходит на передний план!!!!!
+
+	if (!EditMode) IE.FullScreen = true;
+
+
+//	new ActiveXObject("WScript.Shell").Run('WinActivate.exe 0x' + IE.HWND.toString(16), 7, true);
+	new ActiveXObject("WScript.Shell").Run('WinActivate.exe 0x' + IE.HWND.toString(16));
+
+
+/*
+//	DX.SwitchToThisWindow(IE.HWND, 1);
+
+//	19.09.2013: (Beta)
+//	Продолжаю попытки вывести окно вперёд 10 раз, пока не выведу, а если так и не получилось,
+//	то минимазирую все окна и фокусируюсь на окне - т.е. комбинация вывода окна вперёд.
+	var r = i = 0;
+	while ((IE.HWND != DX.GetForegroundWindow()) || !r ) {
+		r = DX.SetForegroundWindow(IE.HWND);
+		i++;
+		if (i == 10) {
+			(new ActiveXObject("Shell.Application")).MinimizeAll();
+			WScript.Sleep(100);
+			IE.document.parentWindow.focus();
+			break;
+		}
+		WScript.Sleep(100);
+	}
+*/
+}
+
+
+
+// 27.03.2012: TODO: Наверно, лучше сделать интерфейс классом.
+// 01.04.2012: Добавил параметр elapsedTime - время отработанное основным скриптом без интерфейса.
+// 02.04.2012: Убрал параметр. Оставшееся время буду тут считать.
+function CreateInterface() {
+
+	if (!IE) {
+		var wasNot = true;	// До входа в функцию небыло интерфейса
+//		var IE = new ActiveXObject("InternetExplorer.Application");
+		IE = WScript.CreateObject("InternetExplorer.Application", "IE_");
+		IE.Navigate("about:blank"); while (IE.Busy) WScript.Sleep(100);
+
+		with (IE) {
+			Backup = {
+				bTheaterMode: TheaterMode,
+				bFullScreen: FullScreen,
+				bAddressBar: AddressBar,
+				bMenuBar: MenuBar,
+				bToolbar: Toolbar,
+				bStatusBar: StatusBar,
+				bResizable: Resizable,
+				bWidth: Width,
+				bHeight: Height
+			}
+//			TheaterMode = true;
+			AddressBar = false;
+			MenuBar = false;
+			Toolbar = false;
+			StatusBar = false;
+//			Width = 800;
+//			Height = 600;
+//			Resizable = true;
+			Visible = true;
+		}
+
+		IE.document.documentElement.firstChild.appendChild(IE.document.createElement("STYLE"))	// createStyleSheet запрещена в IE11
+		with (IE.document.styleSheets[0]) {
+			addRule("#score", "\
+			height: 26px;\
+			");
+			addRule("#btButton1", "\
+			visibility: hidden;\
+			position: absolute;\
+			right: 10px;\
+			");
+			addRule("#list", "\
+			overflow-y: scroll;\
+			width: 100%;\
+			height: 80%;\
+			border: 1px solid gray;\
+			cursor: default;\
+			");
+			addRule("#list td", "\
+			border-collapse: collapse;\
+			border: 1px solid green;\
+			padding: 8px;\
+			");
+			addRule("#list td:first-child", "\
+			text-align: right;\
+			border-right: 1px solid green;\
+			");
+			addRule("#list .fraction td", "\
+			border: none;\
+			text-align: center;\
+			padding: 2px;\
+			");
+			addRule("#list textarea", "\
+			width: 100%;\
+			height: 192pt;\
+			");
+			addRule(".cssSolved", "\
+			background-color: lightgreen;\
+			");
+		}
+
+
+//		IE.document.write("<title>Задачи</title>");
+		IE.document.body.innerHTML = getResource("PageHTML");	// Создаю интерфейс
+		IE.document.body.scroll = "no";
+		IE.document.body.oncontextmenu=function(){return false};	// подавляем контекстное меню
+		IE.document.body.onselectstart=function(){return EditMode};	// запрет выделения текста, если не в режиме редактирования
+
+
+
+		list = IE.document.getElementById("list");
+		list.saveValues = function (idTask) {
+			var tw = IE.document.getElementById("TaskWaight"+idTask).value;
+			var tt = IE.document.getElementById("TaskText"+idTask).value;
+			var db = new SQLiteDB();
+			if (idTask > 0)
+				db.Execute("UPDATE Tasks SET Weight="+tw+", Task='"+tt+"', Changed=strftime('%s','now') WHERE id="+idTask);
+			else
+				db.Execute("INSERT INTO Tasks (Weight, Task, Changed) VALUES ("+tw+", '"+tt+"', strftime('%s','now'))");
+			db.Close();
+			list.Update();
+		}
+		list.Update = function() {
+			IE.document.getElementById("tb").removeNode(true);
+			var i, e, r;
+			var tb = IE.document.createElement("tbody");
+			tb.id = "tb";
+			tb = IE.document.getElementById("tbl").appendChild(tb);
+			var db = new SQLiteDB();
+			if (EditMode)
+				// 06.03.2012: Здесь надо запрос похитрей, чтобы можно было выделить строки с решенными задачами.
+				// 03.04.2012: Сделал такой запрос.
+				db.Execute("SELECT id, Task, Weight, (SELECT Solved FROM Answers WHERE Answers.idTask = Tasks.id AND Solved = 1) AS Solved FROM Tasks;");
+			else
+				db.Execute("SELECT id, Task, Weight FROM Tasks WHERE id NOT IN (SELECT idTask FROM Answers WHERE Solved = 1)");
+			while (!db.EOF) {
+				r = tb.insertRow();
+				i = db.Item(0);
+				r.id = "r" + i;
+				if (EditMode) {
+//					r.ondblclick = function() { EditTask(this.id.substr(1)) };
+					r.ondblclick = new Function("", "EditTask("+i+")");
+					if (db.Item(3)) r.className = "cssSolved";
+				}
+				with (r.insertCell()) {id = "w"+i; innerHTML = db.Item(2);}
+				with (r.insertCell()) {id = "k"+i; innerHTML = db.Item(1);}
+//				r.insertCell().innerHTML = (EditMode ? "" : "<button class='bt' onclick='CheckSolve("+i+")'>Решение готово</button>");
+				with (r.insertCell())
+					if (!EditMode) {
+						e = IE.document.createElement("BUTTON");
+						e.innerHTML = "Решение готово";
+//						e.value = "Решение готово";
+//						e.id = "b"+i;	// временно
+//						e.className = "btSolve";
+						e.onclick = new Function("", "CheckSolve("+i+")");
+						appendChild(e);
+					} else innerHTML = "&nbsp;";
+				db.MoveNext();
+			}
+			if (EditMode) 
+				with (tb.insertRow()) {
+					id = "r0";
+					ondblclick = new Function("", "EditTask(0)");
+					with (insertCell()) {id = "w0"; innerHTML = "0"};
+					with (insertCell()) {id = "k0"; innerHTML = "---новая задача---"};
+					with (insertCell()) {innerHTML = "&nbsp;"};
+				}
+			// Обновляем статистику...
+			remain = 0;
+			db.Execute("SELECT Earned, Spent, Daily FROM Scores WHERE DT = date();");
+			if (!db.EOF) {	// В принципе, это условие должно выполнятся всегда (если вся остальная часть работает правильно).
+				IE.document.getElementById("lbEarned").innerHTML = db.Item(0);
+				IE.document.getElementById("lbSpent").innerHTML = db.Item(1);
+				remain = 1*db.Item(2);
+			}
+			db.Execute("SELECT Sum(Earned) - Sum(Spent) FROM Scores;");
+			remain += (db.Item(0) >> 0);
+			IE.document.getElementById("lbTotal").innerHTML = remain;
+			db.Close();
+//			IE.document.all.btClose.style.visibility = (!EditMode && (remain > 0)) ? "visible" : "hidden";
+//			IE.document.all.btClose.attachEvent("onclick", CloseInterface);	// addEventListner	(W3C)
+			with (IE.document.getElementById("btButton1")) {
+				if (EditMode) {
+					innerHTML = "Синхронизация";
+					style.visibility = "visible";
+					onclick = Synchronize;
+//					attachEvent("onclick", Syncronize);	// addEventListner	(W3C)
+				} else {
+					innerHTML = "Закрыть";
+					style.visibility = (remain > 0) ? "visible" : "hidden";
+					onclick = CloseInterface;
+//					attachEvent("onclick", CloseInterface);	// addEventListner	(W3C)
+				}
+			}
+		}
+		list.Update();	// С этим надо поаккуратней - list.Update() удаляет всю таблицу с вопросами и строит её заново!
+	}
+	if (!EditMode || wasNot) ShowWindow();	// Если влючен режим редактирования, значит включил его тот, кто сам разберётся в видимости окна.
+}
+
+
+
+// 23.09.2013: Синхронизация базы данных.
+// Предполагается для синхронизации между двумя базами данных (например, для переноса "работа <--> транспорт <--> дом")
+function Synchronize() {
+	// Структура таблиц такова, что в каждой присутствует поле Changed - метка времени, когда было изменение в записи.
+	// Поэтому запись, которая новее я определяю по этому полю.
+	// Внутренняя функция Sync - синхронизирует таблицу table, находя одинаковые строки по полю field
+	function Sync(table, field) {
+		db.Execute("SELECT * FROM main."+table);
+		var a = [], f = [], c = -1, n = "";
+		for (var i=0; i < db.ColumnCount(); i++) {
+			n = db.ColumnName(i).toLowerCase();
+			if (n != field.toLowerCase()) { a[a.length] = "main."+table+"."+n+",\r\next."+table+"."+n; f[f.length] = n; }
+			if (n == "changed") c = (a.length<<1) - 1;
+		}
+		var SQL = "SELECT\r\n"+"main."+table+"."+field+",\r\n"+a.join(",\r\n")+"\r\nFROM main."+table+" INNER JOIN ext."+table+" ON main."+table+"."+field+" = ext."+table+"."+field +
+		"\r\nWHERE main."+table+".Changed <> ext."+table+".Changed";
+		db.Execute(SQL, false);
+// 04.10.2013 Что-то с BEGIN TRANSACTION и COMMIT не получилось, поэтому обрабатываю каждый запрос отдельно.
+		SQL = [];
+		var si;
+		while (!db.EOF){
+			si = SQL.length;
+			a = [];
+			n = (db.Item(c) > db.Item(c+1)) ? 0 : 1;
+			SQL[si] = "UPDATE "+(!n ? "ext." : "main.")+table+" SET\r\n";	// (main.Scores.Changed > ext.Scores.Changed) (main.Scores.DT = ext.Scores.DT)
+			for (i = 0; i < f.length; i++) a[i] = f[i]+" = '"+db.Item((i<<1)+n+1);
+			SQL[si] += a.join("',\r\n")+"'\r\nWHERE "+field+" = '"+db.Item(0)+"';";
+			db.MoveNext();
+		}
+		for (var si in SQL) db.Execute(SQL[si], false);
+		db.Execute("INSERT INTO ext."+table+" SELECT * FROM main."+table+" WHERE "+field+" NOT IN (SELECT "+field+" FROM ext."+table+");");
+		db.Execute("INSERT INTO main."+table+" SELECT * FROM ext."+table+" WHERE "+field+" NOT IN (SELECT "+field+" FROM main."+table+");");
+		return true;
+	}
+
+	var db = new SQLiteDB();
+	db.Execute("ATTACH DATABASE '" + db2FileName + "' AS ext");
+
+	Sync("Answers", "DT");
+	Sync("Scores", "DT");
+	Sync("Tasks", "id");	// !!! Может возникнуть коллизия - наличие разных задач с одинаковым id. Поскольку id - PRIMARY KEY, должен быть уникальным, и добаление записи с таким же id вызовет ошибку!!!
+
+	db.Execute("DETACH DATABASE ext");
+	db.Close();
+
+	list.Update();
+}
+
+
+
+// 06.03.2012: Проверка ответа.
+// Будем проверять так: атрибут "RA" должен совпадать со значением свойтсва "value".
+// Пока проверяются только тэги INPUT и SELECT (без  MULTIPLE).
+function CheckSolve(oTask) {
+//WScript.Echo("AddressBar: " + IE.AddressBar);
+//IE.AddressBar = false;
+//return;
+	var t = IE.document.getElementById("k"+oTask).children;
+	var s = e = a = "";
+	var ra;
+	var Solved = true;
+	for (var i=0; i < t.length; i++) {
+		switch (t[i].tagName) {
+			case "INPUT":
+			case "SELECT":
+				ra = t[i].getAttribute("RA");
+				if (ra) {
+					a += ";name=" + t[i].name + ":value=" + t[i].value + ":RA=" + ra;
+					Solved = Solved && (t[i].value == ra);
+					s += t[i].tagName+" - ra: " + ra + "\r\n";
+				} else {
+					e += t[i].tagName+" - ra: NOT FOUND!\r\n";
+				}
+		}
+	}
+	if (!e) {
+		var db = new SQLiteDB();
+		db.Execute("INSERT INTO Answers (idTask, Solved, DT, Answer, Changed) VALUES ("+oTask+", "+(Solved?1:0)+", datetime(), '"+a.substr(1)+"', strftime('%s','now'))");
+		if (Solved) db.Execute("UPDATE Scores SET Earned = Earned + "+IE.document.getElementById("w"+oTask).innerHTML+", Changed=strftime('%s','now') WHERE DT = date();");// обновление данных в таблице заработанных баллов
+		db.Close();
+		list.Update();
+		if (!Solved) IE.document.parentWindow.alert("Задача решена неправильно!");	// WScript.Echo("Задача решена неправильно!");
+	} else {
+		WScript.Echo("Найдены некорректные поля:\r\n" + e);
+	}
+}
+
+
+
+
+
+// 13.02.2012: Создание новой задачи. Всёже лучше сделать отдельной системой.
+// 28.02.2012: Создание/редактирование задачи.
+// 27.03.2012: Так как скрипт работает теперь отдельно, в интерфейсе нет объекта window, то решил переделать
+//				редактирование задачи не в моодальном диалоге а прямо в ячейке таблицы.
+function EditTask(TaskID) {
+// Если TaskID=0 - значит добавляем новую задачу
+	var t = "";
+	if (TaskID) {
+		var db = new SQLiteDB();
+		db.Execute("SELECT Task FROM Tasks WHERE id = "+TaskID);	// 06.03.2012: Здесь надо запрос похитрей, чтобы можно было выделить строки с решенными задачами.
+		t = db.Item(0);
+		db.Close();
+	} else t = IE.document.getElementById("k"+TaskID).innerHTML;	// innerHTML содержит не совсем тоже, что и в базе (например, переводы строки заменяются на пробелы)
+	IE.document.getElementById("k"+TaskID).innerHTML = 
+		'<P>Вес: <INPUT TYPE=TEXT MAXLENGTH="2" SIZE="2" id="TaskWaight'+TaskID+'" VALUE="'+IE.document.getElementById("w"+TaskID).innerHTML+'">' +
+		'<P>Текст (html):<BR><TEXTAREA id="TaskText'+TaskID+'">'+t+'</TEXTAREA><BR>'+
+		'<INPUT type=BUTTON id="btnOk_'+TaskID+'" VALUE="Сохранить">'+
+		'<INPUT type=BUTTON id="btnCancel_'+TaskID+'" VALUE="Отмена">';
+	IE.document.getElementById("btnOk_"+TaskID).onclick = function() { list.saveValues(TaskID) };
+	IE.document.getElementById("btnCancel_"+TaskID).onclick = list.Update;
+	IE.document.getElementById("w"+TaskID).innerHTML = "";
+}
+
+
+
+
+function CloseInterface() {
+//WScript.Echo("CloseInterface: " + IE.HWND);
+	if (IE) {
+		with (Backup) {
+			IE.TheaterMode = bTheaterMode;
+			IE.FullScreen = bFullScreen;
+			IE.AddressBar = bAddressBar;
+			IE.MenuBar = bMenuBar;
+			IE.Toolbar = bToolbar;
+			IE.StatusBar = bStatusBar;
+			IE.Resizable = bResizable;
+			IE.Width = bWidth;
+			IE.Height = bHeight;
+		}
+		IE.Quit();
+		WScript.DisconnectObject(IE);	// Не уверен в действенности, но пока другого способа не знаю
+		IE = null;
+	}
+	EditMode = false;
+}
+
+// 23.03.2012: пока комментирую т.к. всё-равно отменить закрытие окна я не могу, а обрабатывать это событие пока нет необходимости
+// 27.03.2012: При закрытии окна браузера в переменной остаётся недействительный объект, поэтому здесь его буду удалять.
+function IE_OnQuit() {
+// Сюда попадает при закрытии окна пользователем (крестик или Alt+F4)
+// Поскольку сюда попадаем только при закрытии окна пользователем, то отправлять команду о закрытии окна нет смысла???
+//WScript.Echo("IE_OnQuit: " + IE);
+//	command.fresh = true;
+//	command.cmd = cmdCloseInterface;
+
+//WScript.Echo("IE_OnQuit: " + IE);
+	CloseInterface();
+}
+
+
+
+
+// Количество оставшегося времени по запросу из базы данных
+function TimeRemain() {
+	var db = new SQLiteDB();
+	var Daily = DailyLimit;	// минут разрешено в сутки
+	db.Execute("SELECT Daily FROM Scores WHERE DT = date();");
+	if (db.EOF) {	// В базе данных ещё нет записи про текущий день
+		db.Execute("INSERT INTO Scores (DT, Daily, Earned, Spent, Changed) VALUES (date(), "+Daily+", 0, 0, strftime('%s','now'));");
+	} else {
+		Daily = 1*db.Item(0);
+	}
+	db.Execute("SELECT Sum(Earned) - Sum(Spent) FROM Scores;");
+	Daily += (db.Item(0) >> 0);
+	db.Close();
+	return Daily;
+}
+
+
+// Уменьшение оставшегося времени на secondsDown секунд (с точностью до минут)
+function CountDown(secondsDown) {
+	var m = (secondsDown / Ticks) >> 0;
+	if (m > 0) {
+		var db = new SQLiteDB();
+		db.Execute("SELECT Daily, Spent FROM Scores WHERE DT = date();");
+		if (!db.EOF) {	// Если в базе данных есть записи про текущий день
+			var d = 1*db.Item(0);
+			var s = 1*db.Item(1);
+			d -= m;
+			if (d < 0) { s -= d; d = 0 }
+			var r = db.Execute("UPDATE Scores SET Daily="+d+", Spent="+s+", Changed=strftime('%s','now') WHERE DT = date();");
+		}
+		db.Close();
+	}
+}
+
+
+
+function main() {
+	var isQuit = false;
+	var elapsed = 0;
+	var tick = 0;
+
+	// Использую DynamicWrapperX для вызова системных функций.
+	var WshShell = new ActiveXObject("WScript.Shell");
+	WshShell.Run('regsvr32.exe /s /i "'+dynwrapxLib+'"', 7, true);
+	DX = new ActiveXObject("DynamicWrapperX");
+//	DX.Register("user32.dll", "SwitchToThisWindow", "i=ll");
+	DX.Register("user32.dll", "GetForegroundWindow", "r=h");
+//	DX.Register("user32.dll", "SetForegroundWindow", "i=h", "r=l");
+
+	DX.Register(sqlite3Lib, "sqlite3_open16", "i=wp", "r=l");
+	DX.Register(sqlite3Lib, "sqlite3_close", "i=p", "r=l");
+	DX.Register(sqlite3Lib, "sqlite3_prepare16_v2", "i=pwlpp", "r=l");
+	DX.Register(sqlite3Lib, "sqlite3_step", "i=p", "r=l");
+	DX.Register(sqlite3Lib, "sqlite3_column_count", "i=p", "r=l");
+	DX.Register(sqlite3Lib, "sqlite3_column_name16", "i=pl", "r=w");
+	DX.Register(sqlite3Lib, "sqlite3_column_text16", "i=pl", "r=w");
+	DX.Register(sqlite3Lib, "sqlite3_finalize", "i=p", "r=l");
+	DX.Register(sqlite3Lib, "sqlite3_reset", "i=p", "r=l");
+//	DX.Register(sqlite3Lib, "sqlite3_last_insert_rowid", "i=p", "r=l");
+
+	remain = TimeRemain();	// Количество оставшегося времени по запросу из базы данных
+
+	co.setProperty('that', this);
+
+	while (!isQuit) {
+		WScript.Sleep(1000);
+		if (command.fresh) {
+			command.fresh = false;
+			CountDown(elapsed); elapsed = 0;
+			remain = TimeRemain();
+			switch(command.cmd){
+				case cmdQuit:
+					// Тут надо обновить данные об отработанном времени. см. выше - CountDown(elapsed);
+					isQuit = true;
+					break;
+				case cmdEditModeOn:
+					EditMode = true;
+					CreateInterface();
+					list.Update();
+					break;
+				case cmdEditModeOff:
+					EditMode = false;
+					CreateInterface();
+					list.Update();
+					break;
+				case cmdShowInterface:
+					//EditMode = false;	// Переключением режима редактирования должны заниматься соответствующие команды.
+					CreateInterface();
+					break;
+				case cmdCloseInterface:
+					CloseInterface();
+					break;
+			}
+		}
+		if (!(tick++ % Ticks))	// Прошла очередная виртуальная минута
+			if (IE) {	// Окно открыто
+				if (!EditMode && (IE.HWND != DX.GetForegroundWindow()))	// Если НЕ режим редактирования и окно НЕ на переднем фоне
+					command.set(cmdShowInterface);
+			} else	// Нет окна
+				if (Ticks * remain <= elapsed)	// Оставшихся секунд меньше или равно, чем прошедших
+					command.set(cmdShowInterface);
+
+
+if (!!IE) IE.document.getElementById("test").innerHTML = 
+	"tick: " + tick + "<br/>\r\n" +
+	"Ticks (" + Ticks + ") * remain (" + remain + ") <= elapsed (" + elapsed + ")<br/>\r\n" +
+	"IE.HWND: 0x" + IE.HWND.toString(16) + "<br/>\r\n" +
+	"GetForegroundWindow: 0x" + DX.GetForegroundWindow().toString(16) + "<br/>\r\n" +
+	"IE.visible: " + IE.visible + "<br/>\r\n" +
+	"IE.window: " + IE.width + "x" + IE.height + " @ " + IE.left + ":" + IE.top + "<br/>\r\n"
+;
+
+		// 16.09.2013: Особенность: если окно выведено, но находится сзади, то время не отсчитывается!
+		// Надо проверить, чтобы окно было на переднем плане!
+		!IE && elapsed++;	// Если не показан интерфейс, то отсчитываем время
+	}
+	try {IE.Quit()} catch (isQuit) {}
+//	delete IE;	- delete не удаляет переменные (объявленные через var), а только свойства объекта, поэтому, пока это не объект, нет смысла его удалять.
+	co.close();
+
+	WshShell.Run('regsvr32.exe /s /u /i "'+dynwrapxLib+'"', 7, true);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+//----------[http://forum.script-coding.com/viewtopic.php?id=5573&p=3]----------------------------------------------------------------
+
+function GlobalContainer(signature) {
+	signature = signature || GlobalContainer.signature;
+	this.appWindow = GlobalContainer.getInstance(signature);
+	if (!this.appWindow) {
+		this.appWindow = GetObject('new:{C08AFD90-F2A1-11D1-8455-00A0C91F3880}');
+		this.appWindow.StatusText = signature;
+	}
+};
+GlobalContainer.getInstance = function(signature) {
+	signature = signature || GlobalContainer.signature;
+	var appList = (new ActiveXObject('Shell.Application')).Windows();
+	var i = appList.Count;
+	while ( i-- ) {
+		var e;
+		try {
+			var app = appList.Item(i);
+			if ( app.StatusText && app.StatusText.indexOf(signature) == 0 ) {
+				return app;
+			}
+		} catch (e) {
+		}
+	}
+};
+GlobalContainer.prototype.getProperty = function(name) {
+//	return this.appWindow.GetProperty(name);
+	var e;
+	try {
+		return this.appWindow.GetProperty(name);
+	} catch (e) {
+	}
+};
+GlobalContainer.prototype.setProperty = function(name, value) {
+//	return this.appWindow.PutProperty(name, value);
+	var e;
+	try {
+		return this.appWindow.PutProperty(name, value);
+	} catch (e) {
+	}
+};
+GlobalContainer.prototype.close = function() {
+//	return this.appWindow.Quit();
+	var e;
+	try {
+		return this.appWindow.Quit();
+	} catch (e) {
+	}
+};
+//==========[http://forum.script-coding.com/viewtopic.php?id=5573&p=3]================================================================
+
+
+
+
+
+GlobalContainer.signature = 'GlobalContainer';	// Имя (сигнатура) объекта, через который будут обменисаться экземпляры программы
+
+//***********************************
+
+
+var co = new GlobalContainer();
+var that = co.getProperty('that');
+
+
+if ( ! that ) {
+	// Связь не обнаружена.
+	if (WScript.Arguments.Named.length == 0)
+		main();
+	else
+		if (WScript.Arguments.Named.Exists('EditMode')) {
+			command.set(WScript.Arguments.Named.Item("EditMode") ? cmdEditModeOn : cmdEditModeOff);
+			main();
+		} else
+			WScript.Arguments.ShowUsage();
+} else {
+	//WScript.Echo("Обнаружена связь с внешним процессом. HWND: " + co.appWindow.HWND  + ", signature : " + co.appWindow.StatusText);
+	var e;
+	if (WScript.Arguments.Named.length == 0) {
+		try {
+			that.command.set(cmdShowInterface);
+		} catch (e) {}
+	} else {
+		try {
+			if ( WScript.Arguments.Named.Exists('close') ) {
+//				WScript.Echo("Попытаемся мягко завершить внешний процесс.");
+				that.command.set(cmdQuit);
+			}
+			if ( WScript.Arguments.Named.Exists('EditMode') ) {
+				that.command.set(WScript.Arguments.Named.Item("EditMode") ? cmdEditModeOn : cmdEditModeOff);
+			}
+			if (!that.command.fresh) WScript.Arguments.ShowUsage();
+		} catch (e) {
+		}
+	}
+	if (e) WScript.Echo("Попытка установить связь с процессом завершилась неудачно. Возможно процесс уже удален.\r\n"+e.description);
+}
+
+
+
+
+//co.close();	!!!!!!!!!!!!!!!!!!!! При закрытии объекта повторный запуск не находит предыдущий, т.к. getInstance возвращает уже существующий объект, если его находит.
+//WScript.Quit();
+
+
+
+
+
+]]></script>
+</job>
+</package>
