@@ -1,0 +1,670 @@
+<?xml version='1.0' encoding='windows-1251' standalone='yes'?>
+<package>
+<job id="TimeControl">
+	<runtime>
+		<description>Контроль знаний и времени</description>
+		<named
+			name = "EditMode"
+			helpstring = "Включение режима редактирования заданий"
+			type = "boolean"
+			required = "false"
+		/>
+		
+		<named
+			name = "Close"
+			helpstring = "Завершение работы"
+			type = "simple"
+			required = "false"
+		/>
+
+		
+		<example>Например: tc4.wsf /EditMode+</example>
+	</runtime>
+	<resource id="PageHTML"><![CDATA[
+		<div id="score">
+			На сегодня:
+			можно заработать - <label id="lbAble">0</label>,
+			заработано - <label id="lbEarned">0</label>,
+			израсходовано - <label id="lbSpent">0</label>,
+			осталось - <label id="lbTotal">0</label>
+			<button id="btButton1"></button>
+		</div>
+		<div id="list"><table id="tbl" width="100%" cellpadding="0" cellspacing="0" border="0">
+		<thead style="background-color: lavender;"><tr><th>Вес</th><th>Текст задачи</th><th>Ответ</th></tr></thead>
+		<tbody id="tb"></tbody></table>
+		</div>
+		<div id="test"></div>
+	]]></resource>
+
+
+
+
+
+<script language="JScript"><![CDATA[
+
+var command = { fresh: false, cmd: null, set: function(theCommand) { this.fresh = true; this.cmd = theCommand } };
+var cmdEditModeOn = 1;
+var cmdEditModeOff = 2;
+var cmdQuit = 3;
+var cmdShowInterface = 4;
+var cmdCloseInterface = 5;
+
+var Ticks = 10;			// Интервал времени, через который идёт отсчёт (виртуальная минута).
+var DailyLimit = 40;	// минут разрешено в сутки
+var remain = 0;			// Количество оставшихся (виртуальных) минут
+var EditMode = false;
+var Backup;	// Объект для сохранения настроек IE
+var list;	// Список задач
+var CurrentPath = WScript.ScriptFullName.substring(0, WScript.ScriptFullName.indexOf(WScript.ScriptName));
+
+
+var mdb1FileName = CurrentPath + "tc.mdb";
+var mdb2FileName = CurrentPath + "tc_copy.mdb";
+
+var WinActivate = "g:\\temp\\" + "WinActivate.exe";
+
+var IE;	// Основной интерфейс - InternetExplorer
+
+// 18.12.2013 Перенёс историю версий и изменений в отдельный файл tc-history.txt
+
+
+Date.prototype.format = function(format) {
+	var _aMonth = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+	var yyyy = this.getFullYear();
+	var yy = yyyy.toString().substring(2);
+	var m = this.getMonth() + 1;
+	var mm = m < 10 ? "0" + m : m;
+	var d = this.getDate();
+	var dd = d < 10 ? "0" + d : d;
+	var h = this.getHours();
+	var hh = h < 10 ? "0" + h : h;
+	var n = this.getMinutes();
+	var nn = n < 10 ? "0" + n : n;
+	var s = this.getSeconds();
+	var ss = s < 10 ? "0" + s : s;
+
+	format = format.replace(/yyyy/i, yyyy);
+	format = format.replace(/yy/i, yy);
+	format = format.replace(/mm/i, mm);
+	format = format.replace(/m/i, m);
+	format = format.replace(/dd/i, dd);
+	format = format.replace(/d/i, d);
+	format = format.replace(/hh/i, hh);
+	format = format.replace(/h/i, h);
+	format = format.replace(/nn/i, nn);
+	format = format.replace(/n/i, n);
+	format = format.replace(/ss/i, ss);
+	format = format.replace(/s/i, s);
+	format = format.replace(/B/, _aMonth[m-1]);
+
+	return format;
+}
+
+
+
+
+function DataBase(FileName) {
+	this.db = null;
+	this.dbFileName = "";
+	this.cnn = new ActiveXObject("ADODB.Connection");
+	this.RS = new ActiveXObject("ADODB.RecordSet");
+	var Provider = "Provider=Microsoft.Jet.OLEDB.4.0;Data Source=";
+//	var Provider = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=";
+//	var Provider = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};Dbq=";
+	var adStateClosed = 0x00000000;
+
+
+	this.Execute = function(Query, log) {
+		if (log) this.Log("Execute SQL: " + Query);
+		if (this.cnn.state == adStateClosed) {try {this.cnn.Open()}catch(e){WScript.Echo(e.number+": "+e.description);return(1)}}
+		// 01.10.2010: Когда делаю запрос из пустой таблицы, то RS закрывается (остаётся закрытым) и подымается ошибка без описания.
+		try {
+			this.RS=this.cnn.Execute(Query)
+		}catch(e){
+			this.Log("DataBase Error: "+e.number+": "+e.description+"\r\nQuery: "+Query+"\r\nRS state: "+this.RS.State, true);
+			return(2)
+		}
+		return 0;
+	}
+	this.Close = function() {
+		if (this.RS.State != adStateClosed) this.RS.Close();
+		if (this.cnn.State != adStateClosed) this.cnn.Close();
+	}
+
+	this.Open = function(FileName) {
+		if (this.db) this.Close();
+		this.dbFileName = FileName || mdb1FileName;
+		this.cnn.ConnectionString = Provider + this.dbFileName + ";";
+	};
+	this.Log = function(msg, show) {
+		var t = (new Date()).format("yyyy.mm.dd hh:nn:ss");
+		msg = t + ": " + msg;
+		var ForAppending = 8;
+		var ts = (new ActiveXObject("Scripting.FileSystemObject")).OpenTextFile(this.dbFileName + ".log", ForAppending, true);
+		ts.WriteLine(msg);
+		ts.Close();
+		if (show) WScript.Echo(msg);
+	}
+
+
+
+	this.Open(FileName);
+	return this;
+}
+
+
+
+
+// 27.03.2012: TODO: Наверно, лучше сделать интерфейс классом.
+// 01.04.2012: Добавил параметр elapsedTime - время отработанное основным скриптом без интерфейса.
+// 02.04.2012: Убрал параметр. Оставшееся время буду тут считать.
+function CreateInterface() {
+
+	if (!IE) {
+		var wasNot = true;	// До входа в функцию небыло интерфейса
+//		var IE = new ActiveXObject("InternetExplorer.Application");
+		IE = WScript.CreateObject("InternetExplorer.Application", "IE_");
+		IE.Navigate("about:blank"); while (IE.Busy) WScript.Sleep(100);
+
+		with (IE) {
+			Backup = {
+				bTheaterMode: TheaterMode,
+				bFullScreen: FullScreen,
+				bAddressBar: AddressBar,
+				bMenuBar: MenuBar,
+				bToolbar: Toolbar,
+				bStatusBar: StatusBar,
+				bResizable: Resizable,
+				bWidth: Width,
+				bHeight: Height
+			}
+//			TheaterMode = true;
+			AddressBar = false;
+			MenuBar = false;
+			Toolbar = false;
+			StatusBar = false;
+//			Width = 800;
+//			Height = 600;
+//			Resizable = true;
+			Visible = true;
+		}
+
+		IE.document.documentElement.firstChild.appendChild(IE.document.createElement("STYLE"))	// createStyleSheet запрещена в IE11
+		with (IE.document.styleSheets[0]) {
+			addRule("#score", "\
+			height: 26px;\
+			");
+			addRule("#btButton1", "\
+			visibility: hidden;\
+			position: absolute;\
+			right: 10px;\
+			");
+			addRule("#list", "\
+			overflow-y: scroll;\
+			width: 100%;\
+			height: 80%;\
+			max-width: 1200px;\
+			margin: auto;\
+			border: 1px solid gray;\
+			cursor: default;\
+			");
+			addRule("#list td", "\
+			border-collapse: collapse;\
+			border: 1px solid green;\
+			padding: 8px;\
+			");
+			addRule("#list td:first-child", "\
+			text-align: right;\
+			border-right: 1px solid green;\
+			");
+			addRule("#list .fraction td", "\
+			border: none;\
+			text-align: center;\
+			padding: 2px;\
+			");
+			addRule("#list textarea", "\
+			width: 100%;\
+			height: 192pt;\
+			");
+			addRule(".cssSolved", "\
+			background-color: lightgreen;\
+			");
+		}
+
+
+//		IE.document.write("<title>Задачи</title>");
+		IE.document.body.innerHTML = getResource("PageHTML");	// Создаю интерфейс
+		IE.document.body.scroll = "no";
+		IE.document.body.oncontextmenu=function(){return false};	// подавляем контекстное меню
+		IE.document.body.onselectstart=function(){return EditMode};	// запрет выделения текста, если не в режиме редактирования
+
+
+
+		list = IE.document.getElementById("list");
+		list.saveValues = function (idTask) {
+			var tw = IE.document.getElementById("TaskWaight"+idTask).value;
+			var tt = IE.document.getElementById("TaskText"+idTask).value;
+			var db = new DataBase();
+			if (idTask > 0)
+				db.Execute("UPDATE Tasks SET Weight="+tw+", Task='"+tt+"' WHERE id="+idTask);
+			else
+				db.Execute("INSERT INTO Tasks (Weight, Task) VALUES ("+tw+", '"+tt+"')");
+			db.Close();
+			list.Update();
+		}
+		list.Update = function() {
+			IE.document.getElementById("tb").removeNode(true);
+			var i, e, r;
+			var tb = IE.document.createElement("tbody");
+			tb.id = "tb";
+			tb = IE.document.getElementById("tbl").appendChild(tb);
+			var db = new DataBase();
+			if (EditMode)
+				// 06.03.2012: Здесь надо запрос похитрей, чтобы можно было выделить строки с решенными задачами.
+				// 03.04.2012: Сделал такой запрос.
+				db.Execute("SELECT id, Task, Weight, (SELECT Solved FROM Answers WHERE Answers.idTask = Tasks.id AND Solved = True) AS Solved FROM Tasks;");
+			else
+				db.Execute("SELECT id, Task, Weight FROM Tasks WHERE id NOT IN (SELECT idTask FROM Answers WHERE Solved = True)");
+			while (!db.RS.EOF) {
+				r = tb.insertRow();
+				i = db.RS("id").value;
+				r.id = "r" + i;
+				if (EditMode) {
+//					r.ondblclick = function() { EditTask(this.id.substr(1)) };
+					r.ondblclick = new Function("", "EditTask("+i+")");
+					if (db.RS("Solved").value) r.className = "cssSolved";
+				}
+				with (r.insertCell()) {id = "w"+i; innerHTML = db.RS("Weight").value;}
+				with (r.insertCell()) {id = "k"+i; innerHTML = db.RS("Task").value;}
+//				r.insertCell().innerHTML = (EditMode ? "" : "<button class='bt' onclick='CheckSolve("+i+")'>Решение готово</button>");
+				with (r.insertCell())
+					if (!EditMode) {
+						e = IE.document.createElement("BUTTON");
+						e.innerHTML = "Решение готово";
+//						e.value = "Решение готово";
+//						e.id = "b"+i;	// временно
+//						e.className = "btSolve";
+						e.onclick = new Function("", "CheckSolve("+i+")");
+						appendChild(e);
+					} else innerHTML = "&nbsp;";
+				db.RS.MoveNext();
+			}
+			if (EditMode) 
+				with (tb.insertRow()) {
+					id = "r0";
+					ondblclick = new Function("", "EditTask(0)");
+					with (insertCell()) {id = "w0"; innerHTML = "0"};
+					with (insertCell()) {id = "k0"; innerHTML = "---новая задача---"};
+					with (insertCell()) {innerHTML = "&nbsp;"};
+				}
+			// Обновляем статистику...
+			remain = 0;
+			db.Execute("SELECT Earned, Spent, Daily FROM Scores WHERE DT = date();");
+			if (!db.RS.EOF) {	// В принципе, это условие должно выполнятся всегда (если вся остальная часть работает правильно).
+				IE.document.getElementById("lbEarned").innerHTML = db.RS("Earned").value;
+				IE.document.getElementById("lbSpent").innerHTML = db.RS("Spent").value;
+				remain = db.RS("Daily").value;
+			}
+			db.Execute("SELECT Sum(Earned) - Sum(Spent) FROM Scores;");
+			remain += (db.RS(0).value >> 0);
+			IE.document.getElementById("lbTotal").innerHTML = remain;
+			db.Execute("SELECT SUM(Weight) FROM Tasks WHERE id NOT IN (SELECT idTask FROM Answers WHERE Solved = True)");
+			IE.document.getElementById("lbAble").innerHTML = db.RS(0).value;
+			db.Close();
+//			IE.document.all.btClose.style.visibility = (!EditMode && (remain > 0)) ? "visible" : "hidden";
+//			IE.document.all.btClose.attachEvent("onclick", CloseInterface);	// addEventListner	(W3C)
+			with (IE.document.getElementById("btButton1")) {
+				if (EditMode) {
+					innerHTML = "Синхронизация";
+					style.visibility = "visible";
+					onclick = Synchronize;
+//					attachEvent("onclick", Syncronize);	// addEventListner	(W3C)
+				} else {
+					innerHTML = "Закрыть";
+					style.visibility = (remain > 0) ? "visible" : "hidden";
+					onclick = CloseInterface;
+//					attachEvent("onclick", CloseInterface);	// addEventListner	(W3C)
+				}
+			}
+		}
+		list.Update();	// С этим надо поаккуратней - list.Update() удаляет всю таблицу с вопросами и строит её заново!
+	}
+	if (!EditMode || wasNot) {	// Если влючен режим редактирования, значит включил его тот, кто сам разберётся в видимости окна.
+		// бывший ShowWindow()
+		if (IE.AddressBar) IE.AddressBar = false;
+		if (!EditMode) IE.FullScreen = true;
+		(new ActiveXObject("WScript.Shell")).Run(WinActivate + " 0x" + IE.HWND.toString(16));
+	}
+}
+
+
+
+// 23.09.2013: Синхронизация базы данных.
+// Предполагается для синхронизации между двумя базами данных (например, для переноса "работа <--> транспорт <--> дом")
+// 25.12.2013: Базаданных сделан реплицируемой, поэтому mdb сам следит за изменениями.
+function Synchronize() {
+	var jrSyncTypeImpExp = 3;
+	var jrSyncModeDirect = 2;
+	var repMaster = new ActiveXObject("JRO.Replica");
+	repMaster.ActiveConnection = "Provider=Microsoft.Jet.OLEDB.4.0;Data Source=" + mdb1FileName;
+	repMaster.Synchronize(mdb2FileName, jrSyncTypeImpExp, jrSyncModeDirect);
+
+	list.Update();
+	WScript.Echo("Синхронизация завершена.");
+}
+
+
+
+// 06.03.2012: Проверка ответа.
+// Будем проверять так: атрибут "RA" должен совпадать со значением свойтсва "value".
+// Пока проверяются только тэги INPUT и SELECT (без  MULTIPLE).
+function CheckSolve(oTask) {
+	var t = IE.document.getElementById("k"+oTask).children;
+	var s = e = a = "";
+	var ra;
+	var Solved = true;
+	for (var i=0; i < t.length; i++) {
+		switch (t[i].tagName) {
+			case "INPUT":
+			case "SELECT":
+				ra = t[i].getAttribute("RA");
+				if (ra) {
+					a += ";name=" + t[i].name + ":value=" + t[i].value + ":RA=" + ra;
+					Solved = Solved && (t[i].value == ra);
+					s += t[i].tagName+" - ra: " + ra + "\r\n";
+				} else {
+					e += t[i].tagName+" - ra: NOT FOUND!\r\n";
+				}
+		}
+	}
+	if (!e) {
+		var db = new DataBase();
+		db.Execute("INSERT INTO Answers (idTask, Solved, DT, Answer) VALUES ("+oTask+", "+(Solved?"True":"False")+", Now(), '"+a.substr(1)+"')");
+		if (Solved) db.Execute("UPDATE Scores SET Earned = Earned + "+IE.document.getElementById("w"+oTask).innerHTML+" WHERE DT = Date();");// обновление данных в таблице заработанных баллов
+		db.Close();
+		list.Update();
+		if (!Solved) IE.document.parentWindow.alert("Задача решена неправильно!");	// WScript.Echo("Задача решена неправильно!");
+	} else {
+		WScript.Echo("Найдены некорректные поля:\r\n" + e);
+	}
+}
+
+
+
+
+
+// 13.02.2012: Создание новой задачи. Всёже лучше сделать отдельной системой.
+// 28.02.2012: Создание/редактирование задачи.
+// 27.03.2012: Так как скрипт работает теперь отдельно, в интерфейсе нет объекта window, то решил переделать
+//				редактирование задачи не в моодальном диалоге а прямо в ячейке таблицы.
+function EditTask(TaskID) {
+// Если TaskID=0 - значит добавляем новую задачу
+	var t = "";
+	if (TaskID) {
+		var db = new DataBase();
+		db.Execute("SELECT Task FROM Tasks WHERE id = "+TaskID);	// 06.03.2012: Здесь надо запрос похитрей, чтобы можно было выделить строки с решенными задачами.
+		t = db.RS(0).value;
+		db.Close();
+	} else t = IE.document.getElementById("k"+TaskID).innerHTML;	// innerHTML содержит не совсем тоже, что и в базе (например, переводы строки заменяются на пробелы)
+	IE.document.getElementById("k"+TaskID).innerHTML = 
+		'<P>Вес: <INPUT TYPE=TEXT MAXLENGTH="2" SIZE="2" id="TaskWaight'+TaskID+'" VALUE="'+IE.document.getElementById("w"+TaskID).innerHTML+'">' +
+		'<P>Текст (html):<BR><TEXTAREA id="TaskText'+TaskID+'">'+t+'</TEXTAREA><BR>'+
+		'<INPUT type=BUTTON id="btnOk_'+TaskID+'" VALUE="Сохранить">'+
+		'<INPUT type=BUTTON id="btnCancel_'+TaskID+'" VALUE="Отмена">';
+	IE.document.getElementById("btnOk_"+TaskID).onclick = function() { list.saveValues(TaskID) };
+	IE.document.getElementById("btnCancel_"+TaskID).onclick = list.Update;
+	IE.document.getElementById("w"+TaskID).innerHTML = "";
+}
+
+
+
+
+function CloseInterface() {
+//WScript.Echo("CloseInterface: " + IE.HWND);
+	if (IE) {
+		with (Backup) {
+			IE.TheaterMode = bTheaterMode;
+			IE.FullScreen = bFullScreen;
+			IE.AddressBar = bAddressBar;
+			IE.MenuBar = bMenuBar;
+			IE.Toolbar = bToolbar;
+			IE.StatusBar = bStatusBar;
+			IE.Resizable = bResizable;
+			IE.Width = bWidth;
+			IE.Height = bHeight;
+		}
+		IE.Quit();
+		WScript.DisconnectObject(IE);	// Не уверен в действенности, но пока другого способа не знаю
+		IE = null;
+	}
+	EditMode = false;
+}
+
+// 23.03.2012: пока комментирую т.к. всё-равно отменить закрытие окна я не могу, а обрабатывать это событие пока нет необходимости
+// 27.03.2012: При закрытии окна браузера в переменной остаётся недействительный объект, поэтому здесь его буду удалять.
+function IE_OnQuit() {
+// Сюда попадает при закрытии окна пользователем (крестик или Alt+F4)
+// Поскольку сюда попадаем только при закрытии окна пользователем, то отправлять команду о закрытии окна нет смысла???
+//WScript.Echo("IE_OnQuit: " + IE);
+//	command.fresh = true;
+//	command.cmd = cmdCloseInterface;
+
+//WScript.Echo("IE_OnQuit: " + IE);
+	CloseInterface();
+}
+
+
+
+
+// Уменьшение оставшегося времени на secondsDown секунд (с точностью до минут)
+// Возвращает оставшееся на сегодня количество минут
+function CountDown(secondsDown) {
+	var m = (secondsDown / Ticks) >> 0;
+	var db = new DataBase();
+	var Daily = DailyLimit;	// минут разрешено в сутки
+	db.Execute("SELECT Daily, Spent FROM Scores WHERE DT = date();");
+	if (db.RS.EOF) {	// В базе данных ещё нет записи про текущий день
+		db.Execute("INSERT INTO Scores (DT, Daily, Earned, Spent) VALUES (Date(), "+Daily+", 0, 0);");
+	} else {
+		Daily = db.RS(0).value;
+		if (m > 0) {
+			var s = db.RS(1).value;
+			Daily -= m;
+			if (Daily < 0) { s -= Daily; Daily = 0 }
+			var r = db.Execute("UPDATE Scores SET Daily="+Daily+", Spent="+s+" WHERE DT = Date();");
+		}
+	}
+	db.Execute("SELECT Sum(Earned) - Sum(Spent) FROM Scores;");
+	Daily += db.RS(0).value;
+	db.Close();
+	return Daily;
+}
+
+
+
+function main() {
+	var isQuit = false;
+	var elapsed = 0;
+	var tick = 0;
+
+	co.setProperty('that', this);
+	CountDown(0);	// Делаю отметку в базе данных про сегодняшний день, если таковой небыло.
+	while (!isQuit) {
+		if (command.fresh) {
+			command.fresh = false;
+			switch(command.cmd){
+				case cmdQuit:
+					// Тут надо обновить данные об отработанном времени. см. выше - CountDown(elapsed);
+					isQuit = true;
+					break;
+				case cmdEditModeOn:
+					EditMode = true;
+					CreateInterface();
+					list.Update();
+					break;
+				case cmdEditModeOff:
+					EditMode = false;
+					CreateInterface();
+					list.Update();
+					break;
+				case cmdShowInterface:
+					//EditMode = false;	// Переключением режима редактирования должны заниматься соответствующие команды.
+					CreateInterface();
+					break;
+				case cmdCloseInterface:
+					CloseInterface();
+					break;
+			}
+		}
+		if (!isQuit) {
+			WScript.Sleep(1000);
+			if (!(tick++ % Ticks))	// Прошла очередная виртуальная минута
+				if (IE) {	// Окно открыто
+//					if (!EditMode && (IE.HWND != DX.GetForegroundWindow()))	// Если НЕ режим редактирования и окно НЕ на переднем фоне
+					if (!EditMode)	// Если НЕ режим редактирования
+						command.set(cmdShowInterface);
+				} else	{// Нет окна
+					if ((!EditMode) && (CountDown(Ticks) <= 0)) command.set(cmdShowInterface);
+				}
+		}
+
+/*
+if (!!IE && EditMode) IE.document.getElementById("test").innerHTML = 
+	"tick: " + tick + "<br/>\r\n" +
+	"Ticks (" + Ticks + ") * remain (" + remain + ") <= elapsed (" + elapsed + ")<br/>\r\n" +
+	"IE.HWND: 0x" + IE.HWND.toString(16) + "<br/>\r\n" +
+	"IE.visible: " + IE.visible + "<br/>\r\n" +
+	"IE.window: " + IE.width + "x" + IE.height + " @ " + IE.left + ":" + IE.top + "<br/>\r\n"
+;
+*/
+
+		// 16.09.2013: Особенность: если окно выведено, но находится сзади, то время не отсчитывается!
+		// Надо проверить, чтобы окно было на переднем плане!
+//		!IE && elapsed++;	// Если не показан интерфейс, то отсчитываем время
+	}
+	try {IE.Quit()} catch (isQuit) {}
+//	delete IE;	- delete не удаляет переменные (объявленные через var), а только свойства объекта, поэтому, пока это не объект, нет смысла его удалять.
+	co.close();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+//----------[http://forum.script-coding.com/viewtopic.php?id=5573&p=3]----------------------------------------------------------------
+
+function GlobalContainer(signature) {
+	signature = signature || GlobalContainer.signature;
+	this.appWindow = GlobalContainer.getInstance(signature);
+	if (!this.appWindow) {
+		this.appWindow = GetObject('new:{C08AFD90-F2A1-11D1-8455-00A0C91F3880}');
+		this.appWindow.StatusText = signature;
+	}
+};
+GlobalContainer.getInstance = function(signature) {
+	signature = signature || GlobalContainer.signature;
+	var appList = (new ActiveXObject('Shell.Application')).Windows();
+	var i = appList.Count;
+	while ( i-- ) {
+		var e;
+		try {
+			var app = appList.Item(i);
+			if ( app.StatusText && app.StatusText.indexOf(signature) == 0 ) {
+				return app;
+			}
+		} catch (e) {
+		}
+	}
+};
+GlobalContainer.prototype.getProperty = function(name) {
+//	return this.appWindow.GetProperty(name);
+	var e;
+	try {
+		return this.appWindow.GetProperty(name);
+	} catch (e) {
+	}
+};
+GlobalContainer.prototype.setProperty = function(name, value) {
+//	return this.appWindow.PutProperty(name, value);
+	var e;
+	try {
+		return this.appWindow.PutProperty(name, value);
+	} catch (e) {
+	}
+};
+GlobalContainer.prototype.close = function() {
+//	return this.appWindow.Quit();
+	var e;
+	try {
+		return this.appWindow.Quit();
+	} catch (e) {
+	}
+};
+//==========[http://forum.script-coding.com/viewtopic.php?id=5573&p=3]================================================================
+
+
+
+
+
+GlobalContainer.signature = 'GlobalContainer';	// Имя (сигнатура) объекта, через который будут обменисаться экземпляры программы
+
+//***********************************
+
+
+var co = new GlobalContainer();
+var that = co.getProperty('that');
+
+
+if ( ! that ) {
+	// Связь не обнаружена.
+	if (WScript.Arguments.Named.length == 0)
+		main();
+	else
+		if (WScript.Arguments.Named.Exists('EditMode')) {
+			command.set(WScript.Arguments.Named.Item("EditMode") ? cmdEditModeOn : cmdEditModeOff);
+			main();
+		} else
+			WScript.Arguments.ShowUsage();
+} else {
+	//WScript.Echo("Обнаружена связь с внешним процессом. HWND: " + co.appWindow.HWND  + ", signature : " + co.appWindow.StatusText);
+	var e;
+	if (WScript.Arguments.Named.length == 0) {
+		try {
+			that.command.set(cmdShowInterface);
+		} catch (e) {}
+	} else {
+		try {
+			if ( WScript.Arguments.Named.Exists('close') ) {
+//				WScript.Echo("Попытаемся мягко завершить внешний процесс.");
+				that.command.set(cmdQuit);
+			}
+			if ( WScript.Arguments.Named.Exists('EditMode') ) {
+				that.command.set(WScript.Arguments.Named.Item("EditMode") ? cmdEditModeOn : cmdEditModeOff);
+			}
+			if (!that.command.fresh) WScript.Arguments.ShowUsage();
+		} catch (e) {
+		}
+	}
+	if (e) WScript.Echo("Попытка установить связь с процессом завершилась неудачно. Возможно процесс уже удален.\r\n"+e.description);
+}
+
+
+
+
+//co.close();	!!!!!!!!!!!!!!!!!!!! При закрытии объекта повторный запуск не находит предыдущий, т.к. getInstance возвращает уже существующий объект, если его находит.
+//WScript.Quit();
+
+
+
+
+
+]]></script>
+</job>
+</package>
