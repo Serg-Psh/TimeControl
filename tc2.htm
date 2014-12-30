@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<HTML>
+<HEAD>
+<meta name=vs_targetSchema content="HTML 4.0">
+<meta name=vs_defaultClientScript content="JavaScript">
+<TITLE></TITLE>
+<META HTTP-EQUIV="Content-Type" content="text/html; charset=Windows-1251">
+<STYLE>
+
+
+#list	{
+	overflow-y: scroll;
+	width: 100%;
+	height: 80%;
+	border: 1px solid gray;
+	cursor: default;
+}
+#list td {
+	border-top: 1px solid green;
+	padding: 8px;
+}
+#list th { background-color: lavender; }
+#btAddTask { visibility: hidden; }
+#spShowSolved { visibility: hidden; }
+.bt {
+	border-radius: 6px;
+	border: 1px solid gray;
+	margin-left: 10px;
+}
+#Controls {
+	position: fixed;
+	bottom: 10px;
+	right: 10px;
+}
+</STYLE>
+<script>
+//---- CursorTypeEnum Values ----
+var adOpenForwardOnly = 0;
+var adOpenKeyset = 1;
+var adOpenDynamic = 2;
+var adOpenStatic = 3;
+//---- ObjectStateEnum Values ----
+var adStateClosed = 0x00000000;
+var adStateOpen = 0x00000001;
+//---- LockTypeEnum Values ----
+var adLockReadOnly = 1;
+var adLockPessimistic = 2;
+var adLockOptimistic = 3;
+var adLockBatchOptimistic = 4;
+//-----------------------------
+var EditMode = false;
+var list;	// Список задач
+var cnnString = "Provider=Microsoft.Jet.OLEDB.4.0;Data Source=";
+var dbPath = "D:\\Work\\Programs\\tc\\tcq.mdb";
+
+cnnString += dbPath;
+
+
+
+/*
+28.02.2012 Решил не создавать базу, если её нет (слишком сложно ради единственного раза).
+Структура предполагается следующая:
+Таблица Questions:
+	id		- идентификатор
+	Task	- Задача (вопрос) с соответствующими html-тэгами. В каждом тэге должен быть атрибут "RA" с правильным вариантом.
+	Weight	- Вес задачи - количество баллов/минут, набираемых при правильном решении задачи
+
+
+Таблица Answers:
+	idTask	- идентификатор задачи
+	Solved	- считается ли задача решенной (все поля заполнены как указано в атрибуте "RA")
+	DT		- дата и время ответа
+	Answer	- сам ответ - поля перечислены через ";". Каждое поле представлено введённым значением и правильным ответом, перечислеными через ":"
+
+Строки при создании таблиц теоретически должны быть такими:
+CREATE TABLE Questions (id INTEGER PRIMARY KEY, Task MEMO, Weight INTEGER);
+CREATE TABLE Answers (idTask INTEGER, Solved BOOLEAN, DT TIMESTAMP, Anaswer MEMO);
+*/
+
+// DataBase class
+function DataBase() {
+	this.cnn = new ActiveXObject("ADODB.Connection");
+	this.RS = new ActiveXObject("ADODB.RecordSet");
+	this.cnn.ConnectionString = cnnString;
+	this.RS.LockType = adLockReadOnly;
+	this.RS.CursorType = adOpenStatic;
+	this.Execute = function(Query) {
+		if (this.cnn.state == adStateClosed) {
+			try {this.cnn.Open()}catch(e){alert(e.description);return(1)}
+		}
+		try {this.RS = this.cnn.Execute(Query)}catch(e){alert(e.description);return(2)}
+	}
+	this.Close = function() {
+		if (this.RS.state != adStateClosed) this.RS.Close();
+		if (this.cnn.state != adStateClosed) this.cnn.Close();
+	}
+}
+
+
+
+
+
+
+function Init() {
+	list = document.getElementById("list");
+	list.Update = function() {
+		document.getElementById("tb").removeNode(true);
+		var i;
+		var tbl = document.getElementById("tbl");
+		var r = document.createElement("tbody");
+		r.id = 'tb';
+		tbl.appendChild(r);
+		var db = new DataBase;
+		if (EditMode && document.getElementById("cbShowSolved").checked)
+			db.Execute("SELECT * FROM Tasks");	// 06.03.2012: Здесь надо запрос похитрей, чтобы можно было выделить строки с решенными задачами.
+		else
+			db.Execute("SELECT * FROM Tasks WHERE id NOT IN (SELECT idTask FROM Answers WHERE Solved = True)");
+
+		while (!db.RS.EOF) {
+			r = tb.insertRow();
+			i = db.RS("id").value;
+			r.id = "r" + i;
+			if (EditMode) r.ondblclick = function() { EditTask(this.id.substr(1)) };
+			with (r.insertCell()) {id = "w"+i; innerHTML = db.RS("Weight").value;}
+			with (r.insertCell()) {id = "k"+i; innerHTML = db.RS("Task").value;}
+			r.insertCell().innerHTML = (EditMode ? "" : "<button class='bt' onclick='CheckSolve("+i+")'>Решение готово</button>");
+			db.RS.MoveNext;
+		}
+		db.Close();
+		SetUnselectable(list.children);
+	}
+	list.Update();
+}
+
+// Отключаю возможность выделения текста мышкой для всех потомков внутри узла node.
+function SetUnselectable(node) {
+	for (var i=0; i < node.length; i++) {
+		if (node[i].nodeName.substr(0,1) == "T") node[i].setAttribute("unselectable", "on", 0);	// атрибут работает только в IE. Ставлю только табличным элементам.
+		if (node[i].children.length > 0) SetUnselectable(node[i].children);
+	}
+}
+
+
+function SwitchEditMode() {
+	EditMode = !EditMode;
+	list.Update();
+	document.getElementById("btAddTask").style.visibility = (EditMode ? "visible" : "hidden");
+	document.getElementById("spShowSolved").style.visibility = (EditMode ? "visible" : "hidden");
+	document.getElementById("btSwitchEditMode").style.backgroundColor = (EditMode ? "red" : "");
+}
+
+
+function CheckSolve(oTask) {
+/*
+06.03.2012: Проверка ответа.
+Будем проверять так: атрибут "RA" должен совпадать со значением свойтсва "value".
+Пока проверяются только тэги INPUT и SELECT.
+*/
+	var t = document.getElementById("k"+oTask).children;
+	var s = e = a = "";
+	var ra;
+	var Solved = true;
+	for (var i=0; i < t.length; i++) {
+		switch (t[i].tagName) {
+			case "INPUT":
+			case "SELECT":
+				ra = t[i].getAttribute("RA");
+				if (ra) {
+					a += ";name=" + t[i].name + ":value=" + t[i].value + ":RA=" + ra;
+					Solved = Solved && (t[i].value == ra);
+					s += t[i].tagName+" - ra: " + ra + "\r\n";
+				} else {
+					e += t[i].tagName+" - ra: NOT FOUND!\r\n";
+				}
+		}
+	}
+	if (!e) {
+		var db = new DataBase;
+		db.Execute("INSERT INTO Answers (idTask, Solved, DT, Answer) VALUES ("+oTask+", "+Solved+", Now(), '"+a.substr(1)+"')");
+		db.Close();
+		list.Update();
+		if (!Solved) alert("Задача решена неправильно!");
+	} else {
+		alert("Найдены некорректные поля:\r\n" + e);
+	}
+}
+
+
+// 13.02.2012: Создание новой задачи. Всёже лучше сделать отдельной системой.
+// 28.02.2012: Создание/редактирование задачи.
+function EditTask(TaskID) {
+// Если TaskID=0 - значит добавляем новую задачу
+	var t;
+	var db = new DataBase;
+	if (TaskID < 1) {
+		t = window.showModalDialog("EditTask.htm",
+				{ TaskWaight: 5, TaskText: "Текст новой задачи (HTML)" },
+				"dialogWidth:40em; dialogHeight:20em");
+		t && db.Execute("INSERT INTO Tasks (Weight, Task) VALUES ("+t["TaskWaight"]+", '"+t["TaskText"]+"')");
+	} else {
+		t = window.showModalDialog("EditTask.htm",
+				{ TaskWaight: document.getElementById("w"+TaskID).innerHTML, TaskText: document.getElementById("k"+TaskID).innerHTML },
+				"dialogWidth:40em; dialogHeight:20em");
+		t && db.Execute("UPDATE Tasks SET Weight="+t["TaskWaight"]+", Task='"+t["TaskText"]+"' WHERE id="+TaskID);
+	}
+	db.Close();
+	list.Update();
+}
+
+
+</script>
+</HEAD>
+<BODY onload="Init()">
+
+<div id="list">
+<table id="tbl" width="100%" cellpadding="0" cellspacing="0" border="0">
+<thead><tr><th>Вес</th><th>Текст задачи</th><th>Ответ</th></tr></thead>
+<tbody id="tb"></tbody>
+</table>
+</div>
+<!--
+<div id="list" onselectstart="return false"></div>
+-->
+<div id="Controls">
+<button id="btAddTask" name="addTask" onclick="EditTask(0);">Добавить задачу</button>
+<span id="spShowSolved" unselectable="on"><input id="cbShowSolved" type="checkbox" onclick="list.Update()">Показывать решённые задачи</span>
+<button id="btSwitchEditMode" onclick="SwitchEditMode();">Режим редактирования</button>
+</div>
+
+</BODY>
+</HTML>
