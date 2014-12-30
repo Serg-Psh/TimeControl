@@ -1,0 +1,37 @@
+<HTML>
+	<HEAD>
+		<TITLE> Изменение задачи </TITLE>
+		<STYLE TYPE="text/css">
+			BODY {margin-left:10pt; background:menu}
+		</STYLE>
+		<SCRIPT LANGUAGE="JavaScript">
+			function saveValues() {
+				// Построение массива возвращаемых значений.
+				var retVal = new Array;
+				for (var intLoop = 0; intLoop < document.TaskInfo.length; intLoop++)
+					with (document.TaskInfo[intLoop]) 
+						if (name != "") retVal[name] = value; 
+				window.returnValue = retVal;
+				event.returnValue = false;
+				window.close();
+			}
+		</SCRIPT>
+	</HEAD>
+	<BODY>
+		<!-- Данная форма используется для группирования содержащихся элементов управления в легкодоступный массив. -->
+		<FORM NAME="TaskInfo">
+			<FIELDSET>
+				<LEGEND>Задача</LEGEND>
+				<P>Вес: <INPUT TYPE=TEXT NAME="TaskWaight" MAXLENGTH="2" SIZE="2">
+				<P>Текст (html):<BR><TEXTAREA ROWS="8" COLS="70" NAME="TaskText"></TEXTAREA>
+			</FIELDSET>
+		</FORM>
+		<P STYLE="text-align:center">
+		<INPUT TYPE=SUBMIT STYLE="width:5em" ONCLICK="saveValues();" VALUE="OK">
+		<INPUT TYPE=RESET ONCLICK="window.close();" VALUE="Cancel">
+<script type="text/javascript">
+document.TaskInfo("TaskWaight").value = dialogArguments.TaskWaight;
+document.TaskInfo("TaskText").value = dialogArguments.TaskText;
+</script>
+	</BODY>
+</HTML>
