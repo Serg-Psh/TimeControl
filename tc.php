@@ -40,6 +40,12 @@ if ($cmd) {	// Есть командная строка
 	case "getStat":
 		getStat($uid, ($minutes ? (int) $minutes : 0));
 		break;
+	case "getFullStat":
+		getFullStat($uid);
+		break;
+	case "getUsersList":
+		getUsersList();
+		break;
 	case "getRows":
 		getRows($uid, $rows);
 		break;
@@ -168,6 +174,33 @@ function getStat($UID, $minutesDown) {
 	$result = $mysqli->query("SELECT SUM(Weight) FROM tasks WHERE id NOT IN (SELECT idTask FROM answers WHERE UID = '$UID' AND Solved = True)");
 	$row = $result->fetch_row();
 	echo " Able=\"".$row[0]."\" />";
+}
+
+
+// 10.01.2015:
+// Выдаёт полную статистику за весь период.
+function getFullStat($UID) {
+	global $mysqli, $result;
+	echo "<html><body><table>";
+	echo "<thead><tr><th>Дата</th><th>UID</th><th>Daily</th><th>Заработано</th><th>Потрачено</th></tr></thead><tbody>\r\n";
+	$result = $mysqli->query("SELECT * FROM `scores` WHERE UID = '$UID' ORDER BY DT DESC");
+	while ($row = $result->fetch_assoc()) {
+		printf("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", $row["DT"], $row["UID"], $row["Daily"], $row["Earned"], $row["Spent"]);
+	}
+	echo "</tbody></table></body><html>";
+}
+
+// 09.04.2015:
+// Выдаёт полную список пользователей.
+function getUsersList() {
+	global $mysqli, $result;
+	echo "<html><body><table border=1 cellpadding=4>";
+	echo "<thead><tr><th>id</th><th>Имя</th><th>Зарегистрирован</th><th>Класс</th></tr></thead><tbody>\r\n";
+	$result = $mysqli->query("SELECT * FROM `users`");
+	while ($row = $result->fetch_assoc()) {
+		printf("<tr><td><a href=\"?uid=%s&cmd=getFullStat\">%s</a></td><td>%s</td><td>%s</td><td>%s</td></tr>\n", $row["UID"], $row["UID"], $row["Name"], $row["Registered"], $row["ClassNumber"]);
+	}
+	echo "</tbody></table></body><html>";
 }
 
 
