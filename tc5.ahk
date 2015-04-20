@@ -1,86 +1,42 @@
-/*
-06.01.2014
-Модернизирую проект TimeControl.
-Решил перейти на AutoHotkey. Эксперементируя с его возможностями, меняю концептуальные положения своего проекта:
-1) Перенести в Интернет (на хостинг/сервер) базу данных и HTML-ное содержимое. Локально оставить только
-программку, которая постоянно висит в трэе, считает время, общается с сервером и, при необходимости, запускает
-браузер для решения задач (зарабатывания времени).
-2) Пескольку в AutoHotkey есть возможность управлять своей иконкой и меню в трэе, появилась мысль отменить
-параметры командной строки, проверку уже работающего приложения, передачу сообщений между экземплярами приложения
-и прочую ненужность. Использовать возможности:
-- всплывающих подсказок для отображения оставшегося времени;
-- меню иконки в трэе для переключения режимов.
-*/
+; ----- TimeControl 5. -----
 
 #WinActivateForce
-#SingleInstance force
-;#SingleInstance ignore
+;#SingleInstance force
+#SingleInstance ignore	; Запуск новой копии программы игнорируется (новый процесс не создаётся, если в памяти есть процесс с таким именем)
 
 ;#Persistent  ; Keep the script running until the user exits it.
 
-
 Menu, Tray, NoIcon
+
+EnvGet, USERPROFILE, USERPROFILE
+
+
 
 If 0 > 0
 {
 	StringLower, arg, 1
-	If (arg = "-install")
-		Install()
+	If (arg = "-update")
+		Install(USERPROFILE)	; Устанавливаю в папку прфиля пользователя
 }
+
+If (USERPROFILE <> A_ScriptDir) {
+	Install(USERPROFILE, True)
+}
+
+
+Secret := ReadCfg("Secret")
+UID := ReadCfg("UID")
+If !UID || !Secret {
+	MsgBox, UID OR Secret not found!!!
+	ExitApp
+}
+
 
 
 WriteToLog("Start")
 
-;--- Ставлю дескриптор безопасности с запретом прерываения процесса ---
-; чтобы нельзя было снять задачу в диспетчере задач
-h_process := DllCall("GetCurrentProcess")
-VarSetCapacity(SidSize, 4, 0)
-NumPut(SECURITY_MAX_SID_SIZE := 68, SidSize, 0, "UChar")
-VarSetCapacity(lEveryoneSID, SECURITY_MAX_SID_SIZE, 0)
-DllCall("AdvAPI32\CreateWellKnownSid"
-,	"UInt", 1				; (WELL_KNOWN_SID_TYPE) WellKnownSidType
-,	"UInt", 0				; (PSID) DomainSid
-,	"Ptr", &lEveryoneSID	; (PSID) pSid
-,	"Ptr", &SidSize)		; (DWORD) *cbSid
+MakeProcessUnterminatable()
 
-VarSetCapacity(lExplicitAcessForEveryone, 4+4+4+ 4+4+4+4+4, 0)
-; grfAccessPermissions:
-PROCESS_ALL_ACCESS := 2035711	; 0x001F0FFF
-PROCESS_TERMINATE := 0x0001
-;EXPLICIT_ACCESS
-NumPut(PROCESS_TERMINATE,					lExplicitAcessForEveryone,  0, "UInt")	; grfAccessPermissions
-NumPut(DENY_ACCESS := 3,					lExplicitAcessForEveryone,  4, "UInt")	; grfAccessMode
-;NumPut(NO_INHERITANCE := 0,					lExplicitAcessForEveryone,  8, "UInt")	; grfInheritance
-;NumPut(TRUSTEE_IS_SID := 0,					lExplicitAcessForEveryone, 20, "UInt")	; Trustee.TrusteeForm = TRUSTEE_IS_SID; - первый в enum, очевидно = 0
-NumPut(TRUSTEE_IS_WELL_KNOWN_GROUP := 5,	lExplicitAcessForEveryone, 24, "UInt")	; Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-NumPut(&lEveryoneSID,						lExplicitAcessForEveryone, 28, "Ptr")	; ptstrName;
-
-VarSetCapacity(lProcessDACL, 4, 0)
-r := DllCall("AdvAPI32\SetEntriesInAcl"
-,	"UInt", 1							; (ULONG) cCountOfExplicitEntries
-,	"Ptr", &lExplicitAcessForEveryone	; (PEXPLICIT_ACCESS) pListOfExplicitEntries
-,	"UInt", 0							; (PACL) OldAcl
-,	"Ptr", &lProcessDACL)				; (PACL) *NewAcl
-
-;//Setting up (current) process DACL security information
-r := DllCall("AdvAPI32\SetSecurityInfo"
-,	"UInt", h_process						; (HANDLE) handle
-,	"UInt", SE_KERNEL_OBJECT := 6			; (SE_OBJECT_TYPE) ObjectType
-,	"UInt", DACL_SECURITY_INFORMATION := 4	; (SECURITY_INFORMATION) SecurityInfo
-,	"UInt", 0								; (PSID) psidOwner
-,	"UInt", 0								; (PSID) psidGroup
-,	"Ptr", NumGet(&lProcessDACL)			; (PACL) pDacl
-,	"UInt", 0)								; (PACL) pSacl
-
-DllCall("LocalFree", "Ptr", NumGet(&lProcessDACL))
-DllCall("CloseHandle", "UInt", h_process)
-VarSetCapacity(lEveryoneSID, 0)
-VarSetCapacity(lProcessDACL, 0)
-VarSetCapacity(lExplicitAcessForEveryone, 0)
-
-;---------------------------------------------------------------------- 
-
-Secret :=		ReadCfg("Secret", "test")
 WinTitle :=		ReadCfg("WinTitle", "Time Control")
 MenuItemExit :=	ReadCfg("MenuItemExit", "Exit")
 MarginHeight :=	ReadCfg("MarginHeight", 140)
@@ -99,18 +55,6 @@ Gui, Margin, 0, 0
 Gui, -Resize -Border -MaximizeBox -MinimizeBox -SysMenu +ToolWindow +AlwaysOnTop
 Gui, Add, ActiveX, w%NewWidth% h%NewHeight% vWB, Shell.Explorer	; The final parameter is the name of the ActiveX component.
 
-UID := ReadCfg("UID")
-If (!UID) {
-	; Если в конфигурации нет идентификатора пользователя, создаю его, давая ему значение текущего времени.
-	UID := A_NowUTC
-;	Loop {
-		RegWrite, REG_SZ, HKCU, SOFTWARE\2S\tc, UID, %UID%
-;		If (ErrorLevel)
-;			MsgBox, 0x10, %WinTitle%, Ошибка записи конфигурации, 10
-;		Else
-;			Break
-;	}
-}
 
 ServerURL .= "?uid=" . UID
 Request := New XMLHTTP(ServerURL)
@@ -150,6 +94,11 @@ GuiClose:
 	}
 Return
 
+ButtonOK:
+; Сюда попадаем только при подтверждении в диалоге установки из
+; функции Install. Обработка данных формы там же после закрытия Gui.
+	Gui, Submit
+Return
 
 Quit:
 WriteToLog("Try to quit")
@@ -337,7 +286,12 @@ Update() {
 		}
 		WriteToLog("New version dowloaded: " . fs . " " . a.FileTime)
 		FileSetTime, % a.FileTime, %updateFile%
-		Run, "%updateFile%" -install	;, , UseErrorLevel
+		; 11.03.2015: Как и в случае с инсталяцией перезапускаю программу через временный bat-файл,
+		; чтобы в памяти была только одна копия и правильно работал "#SingleInstance ignore"
+		FileDelete, %A_ScriptFullPath%.bat
+		FileAppend, ping -n 3 127.0.0.1`n"%updateFile%" -update`nerase /f /q `%0, %A_ScriptFullPath%.bat
+		Run %A_ScriptFullPath%.bat, , Hide
+;		Run, "%updateFile%" -update	;, , UseErrorLevel
 		; 09.12.2014: Пока просто выхожу в надежде, что обновлялка сделает своё дело и
 		; сама запустит обновлённую программу (ведь она уже может быть в другом месте)
 		ExitApp, 1
@@ -346,14 +300,55 @@ Update() {
 
 
 ; 23.12.2014: Решил перенести установку (обновление) программы в саму программу.
-Install() {
+Install(PathToInstall, Interactive := False) {
 	WriteToLog("---install start")
 	If A_IsAdmin {	; Проверка на наличие административных прав
-		MsgBox, Доступны административные права! Установка бесполезна!
+		MsgBox, Для пользователя '%A_UserName%' доступны административные права!`nУстановка бесполезна!
 		ExitApp
 	}
-	EnvGet, USERPROFILE, USERPROFILE
-	fTarget := USERPROFILE . "\" . A_ScriptName
+	static UserID := ReadCfg("UID", A_NowUTC)
+	static UserName := ReadCfg("UserName", A_UserName)
+	static ClassNumber := ReadCfg("ClassNumber", 6)
+	static Pass1 := ReadCfg("Secret", "")
+	static Pass2 := Pass1
+	If (Interactive) {
+		static MyGuiHwnd
+		Gui, Add, Text, Section, Идентификатор пользователя:
+		Gui, Add, Text,, Имя пользователя:
+		Gui, Add, Text,, Класс обучения (на текущий момент):
+		Gui, Add, Text,, Пароль для выхода:
+		Gui, Add, Text,, Пароль (ещё раз):
+		Gui, Add, Edit, ys w120 Limit14 vUserID, %UserID%
+		Gui, Add, Edit, w120 Limit32 vUserName, %UserName%
+		Gui, Add, DropDownList, vClassNumber, 2|3|4|5|6||7|8|9
+		Gui, Add, Edit, w120 Password vPass1, %Pass1%
+		Gui, Add, Edit, w120 Password vPass2, %Pass1%
+		Gui, Add, Button, w64, OK
+		Gui, -MinimizeBox
+		Loop {
+			Gui, Show
+			Gui +HwndMyGuiHwnd
+			global Remain := 1	; При попытке закрыть окно, отрабатывает метка GuiClose, и чтобы не переделывать её, ставлю переменную, по которой окно закроется.
+			WinWait, ahk_id %MyGuiHwnd%
+			WinWaitClose, ahk_id %MyGuiHwnd%
+;MsgBox Pass1: %Pass1% `nPass2: %Pass2% `nUserID: %UserID% `nUserName: %UserName% `nClassNumber: %ClassNumber%
+		} Until UserID And UserName And Pass1 And (Pass1 == Pass2)
+	}
+	WriteToLog("set ServerURL"		. A_Tab . RegWriteForce("ServerURL", "http://termopuls.ru/tc/tc.php", "REG_SZ", False))
+	WriteToLog("set Ticks"			. A_Tab . RegWriteForce("Ticks", 60, "REG_DWORD", False))
+	WriteToLog("set WinTitle"		. A_Tab . RegWriteForce("WinTitle", "Time Control", "REG_SZ", False))
+	WriteToLog("set MenuItemExit"	. A_Tab . RegWriteForce("MenuItemExit", "Выход", "REG_SZ", False))
+	WriteToLog("set MarginHeight"	. A_Tab . RegWriteForce("MarginHeight", 100, "REG_DWORD", False))
+	WriteToLog("set MarginWidth"	. A_Tab . RegWriteForce("MarginWidth", 40, "REG_DWORD", False))
+	WriteToLog("set Secret"			. A_Tab . RegWriteForce("Secret", Pass1, "REG_SZ", True))
+	WriteToLog("set UserName"		. A_Tab . RegWriteForce("UserName", UserName, "REG_SZ", True))
+	WriteToLog("set UID"			. A_Tab . RegWriteForce("UID", UserID, "REG_SZ", True))
+	WriteToLog("set ClassNumber"	. A_Tab . RegWriteForce("ClassNumber", ClassNumber, "REG_DWORD", True))
+	WriteToLog("set SetupDate"		. A_Tab . RegWriteForce("SetupDate", A_Now, "REG_SZ", Interactive))
+;ExitApp
+
+
+	fTarget := PathToInstall . "\" . A_ScriptName
 	If FileExist(fTarget) {
 		; Файл уже существует
 		; Тут, если программа ещё запущена, нужно бы послать программе сообщение или нажатия, чтобы она сама правильно закрылась, чтобы отпустить файл.
@@ -365,6 +360,8 @@ Install() {
 		If ErrorLevel <> 0
 			WriteToLog("ERROR: Can't set attributes: " . fTarget)
 	}
+	; Тут надо удалить альтернативный поток ":Zone.Identifier", чтобы при первичной установке, после скачки браузером сбросить запрос на разрешение запуска программы.
+	WriteToLog("Delete ADS :Zone.Identifier" . A_Tab . DllCall("DeleteFile", "Str", A_ScriptFullPath . ":Zone.Identifier"))
 	FileCopy, %A_ScriptFullPath%, %fTarget%, True
 	WriteToLog("FileCopy '" . A_ScriptFullPath . "' to '" . fTarget . "'" . A_Tab . ErrorLevel)
 	FileSetAttrib, +RSH, %fTarget%
@@ -373,18 +370,11 @@ Install() {
 	RunWait, icacls.exe "%fTarget%" /inheritance:r /grant:r %A_UserName%:RX, , Hide
 	WriteToLog("set " . A_UserName . " ACL:RX for " . fTarget . A_Tab . ErrorLevel)
 	WriteToLog("set Run"			. A_Tab . RegWriteForce("TimeControl", """" . fTarget . """", "REG_SZ", True, , "Software\Microsoft\Windows\CurrentVersion\Run"))
-	WriteToLog("set ServerURL"		. A_Tab . RegWriteForce("ServerURL", "http://termopuls.ru/tc/tc.php", "REG_SZ", False))
-	WriteToLog("set Ticks"			. A_Tab . RegWriteForce("Ticks", 60, "REG_DWORD", False))
-	WriteToLog("set WinTitle"		. A_Tab . RegWriteForce("WinTitle", "Time Control", "REG_SZ", False))
-	WriteToLog("set MenuItemExit"	. A_Tab . RegWriteForce("MenuItemExit", "Выход", "REG_SZ", False))
-	WriteToLog("set MarginHeight"	. A_Tab . RegWriteForce("MarginHeight", 100, "REG_DWORD", False))
-	WriteToLog("set MarginWidth"	. A_Tab . RegWriteForce("MarginWidth", 40, "REG_DWORD", False))
-	WriteToLog("set Secret"			. A_Tab . RegWriteForce("Secret", "54321", "REG_SZ", False))
 	WriteToLog("---install done")
-	Run, "%fTarget%"
-; Удаляем установочную копию программы
+;	Run, "%fTarget%"
+; Ждём 3 секунды пока закроется установочная копия, запускаем установленный экземпляр программы, а затем удаляем установочную копию программы и bat-файл.
 	FileDelete, %A_ScriptFullPath%.bat
-	FileAppend, ping -n 3 127.0.0.1`nerase /f /q "%A_ScriptFullPath%"`nerase /f /q `%0, %A_ScriptFullPath%.bat
+	FileAppend, ping -n 3 127.0.0.1`n"%fTarget%"`nerase /f /q "%A_ScriptFullPath%"`nerase /f /q `%0, %A_ScriptFullPath%.bat
 	Run %A_ScriptFullPath%.bat, , Hide
 	ExitApp
 }
@@ -427,5 +417,56 @@ GUIvisible() {
 WriteToLog(TextToLog) {
 ;	FileAppend, %A_Now%%A_Tab%%TextToLog%`n, %A_Temp%\tc.log
 	FileAppend, %A_YYYY%-%A_MM%-%A_DD%_%A_Hour%:%A_Min%:%A_Sec%.%A_MSec%%A_Tab%%TextToLog%`n, %A_Temp%\tc.log
+	Return
+}
+
+MakeProcessUnterminatable() {
+;--- Ставлю дескриптор безопасности с запретом прерываения процесса ---
+; чтобы пользователю нельзя было снять задачу в диспетчере задач
+	h_process := DllCall("GetCurrentProcess")
+	VarSetCapacity(SidSize, 4, 0)
+	NumPut(SECURITY_MAX_SID_SIZE := 68, SidSize, 0, "UChar")
+	VarSetCapacity(lEveryoneSID, SECURITY_MAX_SID_SIZE, 0)
+	DllCall("AdvAPI32\CreateWellKnownSid"
+	,	"UInt", 1				; (WELL_KNOWN_SID_TYPE) WellKnownSidType
+	,	"UInt", 0				; (PSID) DomainSid
+	,	"Ptr", &lEveryoneSID	; (PSID) pSid
+	,	"Ptr", &SidSize)		; (DWORD) *cbSid
+
+	VarSetCapacity(lExplicitAcessForEveryone, 4+4+4+ 4+4+4+4+4, 0)
+	; grfAccessPermissions:
+	PROCESS_ALL_ACCESS := 2035711	; 0x001F0FFF
+	PROCESS_TERMINATE := 0x0001
+	;EXPLICIT_ACCESS
+	NumPut(PROCESS_TERMINATE,					lExplicitAcessForEveryone,  0, "UInt")	; grfAccessPermissions
+	NumPut(DENY_ACCESS := 3,					lExplicitAcessForEveryone,  4, "UInt")	; grfAccessMode
+	;NumPut(NO_INHERITANCE := 0,					lExplicitAcessForEveryone,  8, "UInt")	; grfInheritance
+	;NumPut(TRUSTEE_IS_SID := 0,					lExplicitAcessForEveryone, 20, "UInt")	; Trustee.TrusteeForm = TRUSTEE_IS_SID; - первый в enum, очевидно = 0
+	NumPut(TRUSTEE_IS_WELL_KNOWN_GROUP := 5,	lExplicitAcessForEveryone, 24, "UInt")	; Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+	NumPut(&lEveryoneSID,						lExplicitAcessForEveryone, 28, "Ptr")	; ptstrName;
+
+	VarSetCapacity(lProcessDACL, 4, 0)
+	r := DllCall("AdvAPI32\SetEntriesInAcl"
+	,	"UInt", 1							; (ULONG) cCountOfExplicitEntries
+	,	"Ptr", &lExplicitAcessForEveryone	; (PEXPLICIT_ACCESS) pListOfExplicitEntries
+	,	"UInt", 0							; (PACL) OldAcl
+	,	"Ptr", &lProcessDACL)				; (PACL) *NewAcl
+
+	;//Setting up (current) process DACL security information
+	r := DllCall("AdvAPI32\SetSecurityInfo"
+	,	"UInt", h_process						; (HANDLE) handle
+	,	"UInt", SE_KERNEL_OBJECT := 6			; (SE_OBJECT_TYPE) ObjectType
+	,	"UInt", DACL_SECURITY_INFORMATION := 4	; (SECURITY_INFORMATION) SecurityInfo
+	,	"UInt", 0								; (PSID) psidOwner
+	,	"UInt", 0								; (PSID) psidGroup
+	,	"Ptr", NumGet(&lProcessDACL)			; (PACL) pDacl
+	,	"UInt", 0)								; (PACL) pSacl
+
+	DllCall("LocalFree", "Ptr", NumGet(&lProcessDACL))
+	DllCall("CloseHandle", "UInt", h_process)
+	VarSetCapacity(lEveryoneSID, 0)
+	VarSetCapacity(lProcessDACL, 0)
+	VarSetCapacity(lExplicitAcessForEveryone, 0)
+;----------------------------------------------------------------------
 	Return
 }
