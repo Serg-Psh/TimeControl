@@ -32,7 +32,7 @@ if ($cmd) {	// Есть командная строка
 		getTask($id);
 		break;
 	case "setTask":
-		setTask($id, $Weight, $Task);
+		setTask($id, $class, $Weight, $Task);
 		break;
 	case "setAnswer":
 		setAnswer($uid, $taskID, $Solved, $Answer);
@@ -47,7 +47,7 @@ if ($cmd) {	// Есть командная строка
 		getUsersList();
 		break;
 	case "getRows":
-		getRows($uid, $rows);
+		getRows($uid, $class, $rows);
 		break;
 	case "getVersion":
 		getVersion();
@@ -69,11 +69,12 @@ function getTask($taskID) {
 	echo $row[0];
 }
 
-function setTask($id, $Weight, $Task) {
+function setTask($id, $Class, $Weight, $Task) {
 	global $mysqli;
+	if ($Class <= 0) $Class = 6;	// Пока по-умолчанию (если не указан в параметрах) присваиваю 6 класс.
 	$SQL = ($id > 0 ?
-		"UPDATE tasks SET Weight=$Weight, Task='" . $mysqli->real_escape_string($Task) . "' WHERE id=$id" :
-		"INSERT INTO tasks (Weight, Task) VALUES ($Weight, '" . $mysqli->real_escape_string($Task) . "')"
+		"UPDATE tasks SET Weight=$Weight, Class=$Class, Task='" . $mysqli->real_escape_string($Task) . "' WHERE id=$id" :
+		"INSERT INTO tasks (Class, Weight, Task) VALUES ($Class, $Weight, '" . $mysqli->real_escape_string($Task) . "')"
 	);
 	$mysqli->query($SQL);
 	echo $mysqli->affected_rows;
@@ -98,7 +99,7 @@ function setAnswer($UID, $taskID, $Solved, $Answer) {
 }
 
 
-function getRows($UID, $r) {
+function getRows($UID, $Class, $r) {
 // 18.09.2014:	$r (параметр rows) пока не используется - выбираются все строки в зависимости от режима редактирования.
 //				Предполагалось использовать этот параметр для ajax-запросов, чтобы получать порции строк.
 	global $edit, $mysqli, $result;
@@ -109,8 +110,12 @@ function getRows($UID, $r) {
 	header("Cache-Control: no-store, no-cache, must-revalidate");
 	echo("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"); 
 	$SQL = ($edit ?
-		"SELECT id, Task, Weight, (SELECT DT FROM answers WHERE UID = '$UID' AND answers.idTask = tasks.id AND Solved = True) AS Solved FROM tasks ORDER BY id DESC" :
-		"SELECT id, Task, Weight FROM tasks WHERE id NOT IN (SELECT idTask FROM answers WHERE UID = '$UID' AND Solved = True)"
+// 09.07.2015: Пока примитивный расчёт текущего класса: к классу, указанному при регистрации добаляется количество полных лет, прошедших
+// между текущей датой и датой регистрации:  (SELECT ClassNumber + FLOOR(DATEDIFF(NOW(), Registered)/365) FROM users WHERE UID = '$UID')
+		"SELECT id, Task, Weight, (SELECT DT FROM answers WHERE UID = '$UID' AND answers.idTask = tasks.id AND Solved = True) AS Solved FROM tasks WHERE Class = $Class ORDER BY id DESC" :
+//		"SELECT id, Task, Weight, (SELECT DT FROM answers WHERE UID = '$UID' AND answers.idTask = tasks.id AND Solved = True) AS Solved FROM tasks ORDER BY id DESC" :
+		"SELECT id, Task, Weight, Class FROM tasks WHERE id NOT IN (SELECT idTask FROM answers WHERE UID = '$UID' AND Solved = True) AND Class = (SELECT ClassNumber + FLOOR(DATEDIFF(NOW(), Registered)/365) FROM users WHERE UID = '$UID')"
+//		"SELECT id, Task, Weight FROM tasks WHERE id NOT IN (SELECT idTask FROM answers WHERE UID = '$UID' AND Solved = True)"
 	);
 	if ($result = $mysqli->query($SQL)) {
 		echo "<rows total_count=\"" . $result->num_rows . "\">\n";
@@ -309,8 +314,9 @@ if (!preg_match('/firefox/i', $_SERVER['HTTP_USER_AGENT'])) {
 
 <script type="text/javascript">
 
-var EditMode = <? echo ($edit ? "true" : "false") ?>;
-var UID = "<? echo $uid ?>";
+var EditMode = <?= ($edit ? "true" : "false") ?>;
+var Class = <?= $class ? $class : "null" ?>;
+var UID = "<?= $uid ?>";
 
 
 
@@ -478,7 +484,7 @@ function Update() {
 	tb = document.getElementById("tbl").appendChild(document.createElement("tbody"));
 	tb.id = "tb";
 
-	var loader = dhtmlxAjax.postSync(window.location.pathname, "cmd=getRows&rows=all&uid=" + UID + (EditMode ? "&edit=true" : ""));
+	var loader = dhtmlxAjax.postSync(window.location.pathname, "cmd=getRows&rows=all" + (EditMode ? "&edit=true&class=" + Class : "&uid=" + UID));
 	var cellNodeList;
 	var rowsNodeList = loader.xmlDoc.responseXML.getElementsByTagName('row');
 	for (var n = 0; n < rowsNodeList.length; n++) {
@@ -609,7 +615,7 @@ function EditTask(TaskID) {
 		var tw = document.getElementById("TaskWeight"+TaskID).value;
 		var tt = document.getElementById("TaskText"+TaskID).value;
 
-		var r = dhtmlxAjax.postSync(window.location.pathname, "cmd=setTask&id=" + TaskID + "&Weight=" + tw + "&Task=" + encodeURIComponent(tt)).xmlDoc.responseText
+		var r = dhtmlxAjax.postSync(window.location.pathname, "cmd=setTask&id=" + TaskID + "&class=" + Class + "&Weight=" + tw + "&Task=" + encodeURIComponent(tt)).xmlDoc.responseText
 		if (r == "1") {
 			// Задача нормально сохранена.
 			// 21.01.2014: TODO : Обновляем её на месте. Чтобы обновить, надо переделать getTask, чтобы она возвращала кроме текста задачи, ещё её вес. И тогда придётся добавлять ноую строку для новой задачи, если редактировали новую.
